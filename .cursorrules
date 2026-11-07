@@ -1,0 +1,25 @@
+# Project Rules: bike-mechanic-pad
+
+## 1. Core Vision & Ethos
+- Purpose: A 100% local-first, offline-first digital clipboard for solo bike mechanics.
+- License: GPLv3 (Copyleft - must remain free, open-source, and user-owned).
+- Target UX: Designed for dirty hands at the repair stand. High contrast dark mode, large touch targets, keyboard-driven navigation (hotkeys like Ctrl+K or /), and zero layout bloat.
+
+## 2. Technical Architecture (Phase 1 MVP)
+- Execution: Single-device local execution only.
+- Tech Stack: SvelteKit + Tailwind CSS + Embedded Local SQLite (SQLite Wasm / OPFS for browser storage, or Tauri for desktop).
+- Storage Layer: Direct reads/writes to local SQLite.
+- Backups: Manual local database export/download (.db file).
+- Offline Persistence: Ensure the app works seamlessly offline with zero network connection after initial page load (via Service Worker / PWA manifest or Tauri runtime).
+
+## 3. Strict Guardrails & Anti-Patterns
+- NO backend servers, APIs, or REST microservices.
+- NO cloud databases (Postgres, Prisma, Supabase, Firebase).
+- NO user accounts, logins, session tokens, or OAuth integrations.
+- NO multi-device delta sync or cloud folder watchers in Phase 1.
+- DO NOT suggest cloud hosting infrastructure or paywalled backend tools unless explicitly asked.
+
+## 4. Code Standards & Patterns
+- Keep components modular, self-contained, and lightweight.
+- Use explicit foreign keys, indexing, and clean relational SQLite schemas.
+- Prioritize sub-5ms local UI rendering and database queries.
