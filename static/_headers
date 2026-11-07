@@ -1,0 +1,5 @@
+# OPFS (the SQLite storage) needs a cross-origin isolated page. These must be on EVERY file,
+# including the worker script and wasm. Netlify and Cloudflare Pages read this file as-is.
+/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp

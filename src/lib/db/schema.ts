@@ -1,4 +1,9 @@
-export const INITIAL_SCHEMA = `
+// Ordered list of schema migrations. Entry N takes the database from version N-1 to version N.
+// RULES: never edit or reorder an entry that has shipped; add a new entry at the end instead.
+// The applied version is stored inside the database file (PRAGMA user_version), see migrate.ts.
+export const MIGRATIONS: string[] = [
+	// 1: initial schema
+	`
 CREATE TABLE IF NOT EXISTS customers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -50,4 +55,5 @@ CREATE INDEX IF NOT EXISTS idx_bikes_customer_id ON bikes(customer_id);
 CREATE INDEX IF NOT EXISTS idx_work_orders_bike_id ON work_orders(bike_id);
 CREATE INDEX IF NOT EXISTS idx_work_orders_status ON work_orders(status);
 CREATE INDEX IF NOT EXISTS idx_work_order_items_work_order_id ON work_order_items(work_order_id);
-`;
+`
+];

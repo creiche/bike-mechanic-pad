@@ -1,20 +1,20 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { openDatabase } from '#lib/db/client';
+  import { openDatabase } from '../lib/db/client';
 
-  let dbStatus = 'Initializing SQLite WASM & OPFS...';
-  let isConnected = false;
-  let errorMessage = '';
+  let dbStatus = $state('Initializing SQLite WASM & OPFS...');
+  let isConnected = $state(false);
+  let errorMessage = $state('');
 
   onMount(async () => {
     try {
-      const db = await openDatabase();
+      await openDatabase();
       isConnected = true;
       dbStatus = 'SQLite OPFS Connected Successfully (Local)';
-    } catch (err: any) {
+    } catch (err: unknown) {
       isConnected = false;
       dbStatus = 'Failed to initialize database';
-      errorMessage = err.message || String(err);
+      errorMessage = err instanceof Error ? err.message : String(err);
     }
   });
 </script>

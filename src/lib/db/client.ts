@@ -1,71 +1,95 @@
-import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
-import { INITIAL_SCHEMA } from './schema';
+import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
+import type { DbExecOptions, WorkerRequest, WorkerResponse } from './worker-protocol';
+
+export type { DbExecOptions };
 
 export interface SqliteConnection {
-	exec(sql: string): void;
-	close(): void;
+	exec(sql: string, options?: DbExecOptions): Promise<unknown>;
+	close(): Promise<void>;
 }
 
-type SqliteModule = {
-	oo1: {
-		OpfsDb?: new (filename: string, mode?: string) => {
-			exec: (sql: string) => void;
-			close: () => void;
-		};
-		DB?: new (filename: string, mode?: string) => {
-			exec: (sql: string) => void;
-			close: () => void;
-		};
-	};
-};
-
-const DB_FILENAME = '/bike-mechanic-pad.sqlite3';
+type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : never;
 
 let connectionPromise: Promise<SqliteConnection> | null = null;
 
-export async function openDatabase(): Promise<SqliteConnection> {
+async function connect(): Promise<SqliteConnection> {
+	// By default the browser may evict OPFS data under disk pressure (Safari also after ~7 days unused).
+	// Ask for persistent storage so the shop's only copy of its data is not silently deleted.
+	// Not awaited: the browser may show a permission prompt and we must not block startup on it.
+	void navigator.storage?.persist?.().then((granted) => {
+		if (!granted) {
+			console.warn('Persistent storage was not granted; the browser may evict local data.');
+		}
+	});
+
+	const worker = new Worker(new URL('./sqlite.worker.ts', import.meta.url), { type: 'module' });
+	const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+	let nextId = 1;
+
+	// Send one request to the worker and wait for the reply carrying the same id.
+	const send = (request: DistributiveOmit<WorkerRequest, 'id'>) =>
+		new Promise<unknown>((resolve, reject) => {
+			const id = nextId++;
+			pending.set(id, { resolve, reject });
+			worker.postMessage({ ...request, id } as WorkerRequest);
+		});
+
+	worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
+		const reply = event.data;
+		const request = pending.get(reply.id);
+		pending.delete(reply.id);
+		if (reply.ok) {
+			request?.resolve(reply.result);
+		} else {
+			request?.reject(new Error(reply.error));
+		}
+	};
+
+	// A crash in the worker (e.g. failed module load) would otherwise leave every request waiting forever.
+	// Also drop the cached connection so the next call starts a fresh worker instead of talking to a dead one.
+	worker.onerror = (event) => {
+		for (const request of pending.values()) {
+			request.reject(new Error(event.message || 'SQLite worker error.'));
+		}
+		pending.clear();
+		worker.terminate();
+		connectionPromise = null;
+	};
+
+	try {
+		await send({ type: 'init' });
+	} catch (error) {
+		worker.terminate();
+		throw error;
+	}
+
+	return {
+		exec: (sql, options) => send({ type: 'exec', sql, options }),
+		async close() {
+			await send({ type: 'close' });
+			worker.terminate();
+		}
+	};
+}
+
+export function openDatabase(): Promise<SqliteConnection> {
 	if (typeof window === 'undefined') {
-		throw new Error('SQLite OPFS can only be initialized in the browser.');
+		return Promise.reject(new Error('SQLite OPFS can only be initialized in the browser.'));
 	}
 
 	if (!connectionPromise) {
-		connectionPromise = (async () => {
-			// sqlite-wasm initializes itself from the package's browser bundle. The Vite
-			// configuration below is what enables the browser to load the WASM file safely
-			// under the required COOP/COEP headers for OPFS persistence.
-			const sqlite3 = (await sqlite3InitModule()) as SqliteModule;
-
-			const DbCtor = sqlite3.oo1.OpfsDb ?? sqlite3.oo1.DB;
-			if (!DbCtor) {
-				throw new Error('SQLite WebAssembly module did not expose a usable database class.');
-			}
-
-			// OPFS (Origin Private File System) stores the database in a browser-private
-			// sandboxed directory tied to the current origin. That means the app keeps its
-			// customer, bike, and invoice data on the user's device instead of sending it to
-			// a hosted API or remote database.
-			const db = new DbCtor(DB_FILENAME, 'ct');
-
-			// Foreign keys are required for the project relationships: customer -> bike -> work order.
-			db.exec('PRAGMA foreign_keys = ON;');
-
-            // Run schema initialization migration
-            db.exec(INITIAL_SCHEMA);
-
-			return {
-				exec: (sql: string) => db.exec(sql),
-				close: () => db.close()
-			};
-		})();
+		connectionPromise = connect().catch((error: unknown) => {
+			connectionPromise = null; // let the next call retry instead of caching the failure
+			throw error;
+		});
 	}
 
 	return connectionPromise;
 }
 
-export async function runQuery<T = void>(sql: string): Promise<T> {
+export async function runQuery<T = void>(sql: string, bind: BindingSpec = []): Promise<T> {
 	const connection = await openDatabase();
-	connection.exec(sql);
-	return undefined as T;
+	return (await connection.exec(sql, { bind })) as T;
 }
 
 export async function closeDatabase(): Promise<void> {
@@ -74,6 +98,6 @@ export async function closeDatabase(): Promise<void> {
 	}
 
 	const connection = await connectionPromise;
-	connection.close();
 	connectionPromise = null;
+	await connection.close();
 }
