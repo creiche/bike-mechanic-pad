@@ -141,24 +141,24 @@ Mechanics do not configure complex server infrastructure or cloud databases. Ins
 - **Push:** When changes exist in `sync_outbox`, the app writes encrypted JSON delta packets to the connected cloud folder via standard REST APIs (`fetch()`).
 - **Pull:** When opening the app or regaining network access, the app lists pending outbox deltas from other devices, applies them to local SQLite using sequence tracking and watermark acknowledgments.
 
-### 2.1 Transport Priority and Fallback (BYOS -> P2P)
-`bike-mechanic-pad` supports multiple sync transports over the same append-only outbox and peer watermark model.
+### 2.1 Transport Strategy (Current vs Future)
+`bike-mechanic-pad` uses one sync transport in the current product scope.
 
-- **Primary transport:** BYOS cloud relay when configured.
-- **Fallback transport:** direct **P2P WebRTC** sync when BYOS is not configured and a trusted peer is reachable.
-- **No transport available:** continue local-first operation, keep writing mutations to `sync_outbox`, and sync later when any transport becomes available.
+- **Current (implemented and preferred):** BYOS cloud relay.
+- **No BYOS configured:** continue local-first operation, keep writing mutations to `sync_outbox`, and sync once BYOS is connected.
+- **Future/optional:** direct **P2P WebRTC** transport may be added later as an advanced fallback, but it is not part of the current runtime sync path.
 
-This keeps sync semantics consistent regardless of transport. Transport changes must never change domain write behavior or outbox event shape.
+Transport additions must never change domain write behavior or outbox event shape.
 
-### 2.2 P2P Pairing and Trust Model
-P2P sync uses explicit pairing and a user-approved trust relationship.
+### 2.2 P2P Pairing and Trust Model (Future State)
+If P2P is introduced later, it must use explicit pairing and a user-approved trust relationship.
 
 - **Pairing:** explicit offer/answer exchange (for example QR code or copy/paste token), not implicit LAN auto-discovery.
 - **Trust:** peers are allow-listed before accepting deltas.
 - **Channel security:** use WebRTC encrypted data channels and verify remote peer identity against the trusted peer list.
 
 ### 2.3 Conflict and Recovery Rules
-Both BYOS and P2P must use the same conflict and recovery behavior.
+BYOS is the current transport baseline. Any future transport (including P2P) must follow the same conflict and recovery behavior.
 
 - **Conflict policy:** shared deterministic policy across transports (for example last-write-wins by trusted timestamp/version metadata).
 - **Bootstrap:** new or stale peers use snapshot bootstrap (`exportSnapshot` / `importSnapshot`) when outbox replay is insufficient.
@@ -168,7 +168,8 @@ Both BYOS and P2P must use the same conflict and recovery behavior.
 Current implementation focus is the database/repository layer (`sync_outbox`, peer cursors, pruning, snapshots).
 
 - **Implemented now:** append-only outbox + peer cursor model in SQLite.
-- **Planned next:** BYOS transport orchestrator and P2P WebRTC fallback transport orchestrator that consume the same repository APIs.
+- **Planned next:** BYOS transport orchestrator that consumes the repository APIs.
+- **Future option:** P2P WebRTC fallback transport, only if needed after BYOS workflow is stable.
 
 ### 2.5 Near Real-Time Sync Profile (BYOS)
 For solo-shop workflows, sync should feel near real-time (seconds-level freshness), not hard real-time.
