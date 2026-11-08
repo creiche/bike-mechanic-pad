@@ -365,3 +365,79 @@ describe('applyRemoteDeltas', () => {
 		expect(await pruneStaleOutboxLogs(30, 30)).toBe(2);
 	});
 });
+
+describe('component ledger sync', () => {
+	const component = (id: string, updated_at: string, date: string) => ({
+		id,
+		bike_id: 'b1',
+		component_type: 'chain',
+		last_serviced_date: date,
+		work_order_id: 'w1',
+		notes: null,
+		created_at: updated_at,
+		updated_at
+	});
+
+	it('applies line item component tags and bike_component events, then deletes them', async () => {
+		const chain = remoteChain();
+		chain[2] = remote(3, 'work_order', 'INSERT', 'w1', {
+			...JSON.parse(chain[2].payload),
+			items: [
+				{ id: 'i1', item_type: 'part', description: 'Chain', quantity: 1, unit_price_cents: 3500, component_type: 'chain' }
+			]
+		});
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [
+			...chain,
+			remote(4, 'bike_component', 'INSERT', 'k1', component('k1', '2026-11-07T10:00:00.000Z', '2026-11-07'))
+		]);
+
+		expect(queryRows('SELECT component_type FROM work_order_items')).toEqual([{ component_type: 'chain' }]);
+		expect(queryRows('SELECT component_type, last_serviced_date, work_order_id FROM bike_components')).toEqual([
+			{ component_type: 'chain', last_serviced_date: '2026-11-07', work_order_id: 'w1' }
+		]);
+		expect(queryRows('SELECT id FROM sync_outbox')).toEqual([]);
+
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [remote(5, 'bike_component', 'DELETE', 'k1', { id: 'k1' })]);
+		expect(queryRows('SELECT id FROM bike_components')).toEqual([]);
+	});
+
+	it('keeps one row per (bike, component) when two devices created it with different ids; newest wins', async () => {
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', remoteChain());
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [
+			remote(4, 'bike_component', 'INSERT', 'k1', component('k1', '2026-11-07T10:00:00.000Z', '2026-11-07'))
+		]);
+
+		await applyRemoteDeltas(pullPeerId('dev-c'), 'C', [
+			remote(1, 'bike_component', 'INSERT', 'k2', component('k2', '2026-11-08T10:00:00.000Z', '2026-11-08'))
+		]);
+		expect(queryRows('SELECT id, last_serviced_date FROM bike_components')).toEqual([
+			{ id: 'k2', last_serviced_date: '2026-11-08' }
+		]);
+
+		await applyRemoteDeltas(pullPeerId('dev-d'), 'D', [
+			remote(1, 'bike_component', 'INSERT', 'k3', component('k3', '2026-11-01T10:00:00.000Z', '2026-11-01'))
+		]);
+		expect(queryRows('SELECT id FROM bike_components')).toEqual([{ id: 'k2' }]);
+	});
+
+	it('round-trips the ledger and item tags through exportSnapshot/importSnapshot', async () => {
+		const customer = await createCustomer({ name: 'Ana' });
+		const bike = await createBike({ customer_id: customer.id, brand: 'Trek', model: 'Domane' });
+		const order = await createWorkOrder({
+			bike_id: bike.id,
+			status: 'completed',
+			issue_summary: 'Chain',
+			items: [{ item_type: 'part', description: 'Chain', quantity: 1, unit_price_cents: 3500, component_type: 'chain' }]
+		});
+
+		const snapshot = await exportSnapshot();
+		expect(snapshot.data.bike_components).toHaveLength(1);
+
+		await importSnapshot(JSON.parse(JSON.stringify(snapshot)) as DatabaseSnapshot, 'self', 'Self');
+
+		expect(queryRows('SELECT component_type FROM work_order_items')).toEqual([{ component_type: 'chain' }]);
+		expect(queryRows('SELECT bike_id, component_type, work_order_id FROM bike_components')).toEqual([
+			{ bike_id: bike.id, component_type: 'chain', work_order_id: order.id }
+		]);
+	});
+});

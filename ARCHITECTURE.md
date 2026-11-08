@@ -79,14 +79,28 @@ CREATE TABLE work_order_items (
     description TEXT NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
     unit_price_cents INTEGER NOT NULL DEFAULT 0,
+    component_type TEXT, -- optional ledger tag: chain, cassette, brake_pads, fork_service, rear_shock_service, bottom_bracket
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Per-bike component service ledger (stamped automatically when a work order completes)
+CREATE TABLE bike_components (
+    id TEXT PRIMARY KEY,
+    bike_id TEXT NOT NULL REFERENCES bikes(id) ON DELETE CASCADE,
+    component_type TEXT NOT NULL,
+    last_serviced_date TEXT NOT NULL, -- local calendar day, YYYY-MM-DD
+    work_order_id TEXT REFERENCES work_orders(id) ON DELETE SET NULL, -- NULL = manual entry
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    UNIQUE (bike_id, component_type)
 );
 
 -- Append-Only Transactional Outbox for Multi-Device Delta Sync
 CREATE TABLE sync_outbox (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT UNIQUE NOT NULL,
-    entity_type TEXT NOT NULL, -- 'customer', 'bike', 'work_order', 'work_order_item'
+    entity_type TEXT NOT NULL, -- 'customer', 'bike', 'work_order', 'work_order_item', 'bike_component'
     entity_id TEXT NOT NULL,
     action TEXT NOT NULL,      -- 'CREATE', 'UPDATE', 'DELETE'
     payload TEXT NOT NULL,     -- Serialized row payload JSON
@@ -170,6 +184,7 @@ Current implementation focus is the database/repository layer (`sync_outbox`, pe
 - **Implemented now:** append-only outbox + peer cursor model in SQLite.
 - **Also implemented:** BYOS transport (`src/lib/sync/`): `CloudStorageAdapter` interface, Dropbox adapter with OAuth PKCE, and `SyncService` (push, pull, prune; status `idle | syncing | offline | error`; polling, debounce, backoff). Push cursors are `relay:<provider>` rows and pull cursors are `pull:<deviceId>` rows in `peer_sync_state`; pruning ignores pull cursors. Remote deltas are applied with `applyRemoteDeltas()` (one transaction, cursor included, no outbox echo). Customer and bike mutations are now written to the outbox too.
 - **Also implemented:** settings UI (`/settings`): Dropbox app key, sync folder (default `/BikeMechanicPadSync`), device name/id, OAuth PKCE connect/disconnect, "Sync Now", and a live status pill in the app header. `SyncController` (`src/lib/sync/syncController.ts`, exported as `syncService` from `runtime.ts`) owns the active `SyncService` and is the store the UI reads as `$syncService`. The redirect URI to register in the Dropbox console is `<origin>/settings`.
+- **Also implemented:** core domain views. `/` is the work order dashboard (status filter chips with counts, cards with customer/bike/summary/total); `/work-orders/new` and `/work-orders/[id]` create and edit orders (labor/part line items, integer-cent math in `src/lib/domain/money.ts`, status changes; items lock once completed or cancelled). `/customers` manages customers and bikes (create/edit/delete) and shows the per-bike component ledger (`BikeLedger.svelte`). Moving an order into `completed` stamps `bike_components` for every tagged line item inside the same transaction as the status change; `bike_component` is a synced outbox entity (last-write-wins per bike + component type) and is included in snapshots.
 - **Not yet:** packet encryption, remote packet cleanup, snapshot bootstrap trigger, master database export/import.
 - **Future option:** P2P WebRTC fallback transport, only if needed after BYOS workflow is stable.
 

@@ -76,7 +76,19 @@ interface WorkOrderItemSnapshotRow {
 	description: string;
 	quantity: number;
 	unit_price_cents: number;
+	component_type?: string | null;
 	created_at: string;
+}
+
+interface BikeComponentSnapshotRow {
+	id: string;
+	bike_id: string;
+	component_type: string;
+	last_serviced_date: string;
+	work_order_id: string | null;
+	notes: string | null;
+	created_at: string;
+	updated_at: string;
 }
 
 export interface DatabaseSnapshot {
@@ -87,6 +99,8 @@ export interface DatabaseSnapshot {
 		bikes: BikeSnapshotRow[];
 		work_orders: WorkOrderSnapshotRow[];
 		work_order_items: WorkOrderItemSnapshotRow[];
+		// Absent in snapshots exported before schema v5.
+		bike_components?: BikeComponentSnapshotRow[];
 	};
 }
 
@@ -209,6 +223,9 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 	const workOrderItems = await selectRows<WorkOrderItemSnapshotRow>(
 		'SELECT * FROM work_order_items ORDER BY created_at ASC, id ASC'
 	);
+	const bikeComponents = await selectRows<BikeComponentSnapshotRow>(
+		'SELECT * FROM bike_components ORDER BY created_at ASC, id ASC'
+	);
 
 	return {
 		version,
@@ -217,7 +234,8 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 			customers,
 			bikes,
 			work_orders: workOrders,
-			work_order_items: workOrderItems
+			work_order_items: workOrderItems,
+			bike_components: bikeComponents
 		}
 	};
 }
@@ -230,6 +248,7 @@ export async function importSnapshot(
 	const connection = await openDatabase();
 	await connection.exec('BEGIN IMMEDIATE');
 	try {
+		await connection.exec('DELETE FROM bike_components');
 		await connection.exec('DELETE FROM work_order_items');
 		await connection.exec('DELETE FROM work_orders');
 		await connection.exec('DELETE FROM bikes');
@@ -286,8 +305,8 @@ export async function importSnapshot(
 
 		for (const item of snapshot.data.work_order_items) {
 			await connection.exec(
-				`INSERT INTO work_order_items (id, work_order_id, item_type, description, quantity, unit_price_cents, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT INTO work_order_items (id, work_order_id, item_type, description, quantity, unit_price_cents, component_type, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 				{
 					bind: [
 						item.id,
@@ -296,7 +315,28 @@ export async function importSnapshot(
 						item.description,
 						item.quantity,
 						item.unit_price_cents,
+						item.component_type ?? null,
 						item.created_at
+					]
+				}
+			);
+		}
+
+		for (const component of snapshot.data.bike_components ?? []) {
+			await connection.exec(
+				`INSERT INTO bike_components
+				   (id, bike_id, component_type, last_serviced_date, work_order_id, notes, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				{
+					bind: [
+						component.id,
+						component.bike_id,
+						component.component_type,
+						component.last_serviced_date,
+						component.work_order_id,
+						component.notes,
+						component.created_at,
+						component.updated_at
 					]
 				}
 			);
@@ -491,8 +531,8 @@ async function applyWorkOrder(connection: SqliteConnection, delta: OutboxEntry):
 		}
 		const item = raw as Payload;
 		await connection.exec(
-			`INSERT INTO work_order_items (id, work_order_id, item_type, description, quantity, unit_price_cents)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO work_order_items (id, work_order_id, item_type, description, quantity, unit_price_cents, component_type)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 			{
 				bind: [
 					requireString(item, 'id'),
@@ -500,11 +540,61 @@ async function applyWorkOrder(connection: SqliteConnection, delta: OutboxEntry):
 					requireString(item, 'item_type'),
 					requireString(item, 'description'),
 					requireInteger(item, 'quantity'),
-					requireInteger(item, 'unit_price_cents')
+					requireInteger(item, 'unit_price_cents'),
+					optionalString(item, 'component_type')
 				]
 			}
 		);
 	}
+}
+
+// One ledger row per (bike, component type): when two devices created the same pair with different ids,
+// the later updated_at wins and the other row is dropped.
+async function applyBikeComponent(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
+	if (delta.action === 'DELETE') {
+		await connection.exec('DELETE FROM bike_components WHERE id = ?', { bind: [delta.entity_id] });
+		return;
+	}
+
+	const payload = parsePayload(delta);
+	const id = requireString(payload, 'id');
+	const bikeId = requireString(payload, 'bike_id');
+	const componentType = requireString(payload, 'component_type');
+	const updatedAt = optionalString(payload, 'updated_at') ?? delta.created_at;
+
+	const rival = await selectOne<{ id: string; updated_at: string }>(
+		'SELECT id, updated_at FROM bike_components WHERE bike_id = ? AND component_type = ? AND id != ?',
+		[bikeId, componentType, id]
+	);
+	if (rival) {
+		if (rival.updated_at > updatedAt) return;
+		await connection.exec('DELETE FROM bike_components WHERE id = ?', { bind: [rival.id] });
+	}
+
+	const existing = await selectOne<{ updated_at: string }>('SELECT updated_at FROM bike_components WHERE id = ?', [id]);
+	if (existing && existing.updated_at > updatedAt) return;
+
+	await connection.exec(
+		`INSERT INTO bike_components
+		   (id, bike_id, component_type, last_serviced_date, work_order_id, notes, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   bike_id = excluded.bike_id, component_type = excluded.component_type,
+		   last_serviced_date = excluded.last_serviced_date, work_order_id = excluded.work_order_id,
+		   notes = excluded.notes, updated_at = excluded.updated_at`,
+		{
+			bind: [
+				id,
+				bikeId,
+				componentType,
+				requireString(payload, 'last_serviced_date'),
+				optionalString(payload, 'work_order_id'),
+				optionalString(payload, 'notes'),
+				optionalString(payload, 'created_at') ?? delta.created_at,
+				updatedAt
+			]
+		}
+	);
 }
 
 function applyDelta(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
@@ -519,6 +609,8 @@ function applyDelta(connection: SqliteConnection, delta: OutboxEntry): Promise<v
 			return applyBike(connection, delta);
 		case 'work_order':
 			return applyWorkOrder(connection, delta);
+		case 'bike_component':
+			return applyBikeComponent(connection, delta);
 		default:
 			throw new SyncProtocolError(`Unknown entity type "${delta.entity_type}"; update the app to sync it.`);
 	}

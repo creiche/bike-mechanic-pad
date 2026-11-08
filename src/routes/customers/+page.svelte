@@ -1,59 +1,62 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { resolve } from '$app/paths';
+	import { page } from '$app/state';
+	import BikeLedger from '../../lib/components/BikeLedger.svelte';
 	import {
 		createBike,
 		createCustomer,
+		deleteBike,
 		deleteCustomer,
 		getBikesForCustomer,
 		getCustomers,
+		updateBike,
+		updateCustomer,
 		type Bike,
 		type Customer
 	} from '../../lib/db/repositories';
+	import {
+		cardClass,
+		dangerButton,
+		errorBannerClass,
+		inputClass,
+		labelTextClass,
+		primaryButton,
+		secondaryButton,
+		successButton
+	} from '../../lib/ui';
+
+	const emptyCustomerForm = { name: '', phone: '', email: '', notes: '' };
+	const emptyBikeForm = { brand: '', model: '', year: '', color: '', serial_number: '', notes: '' };
 
 	let customers = $state<Customer[]>([]);
 	let selectedCustomerId = $state('');
-	let selectedCustomer = $state<Customer | null>(null);
 	let bikes = $state<Bike[]>([]);
 	let isLoading = $state(true);
+	let busy = $state(false);
 	let errorMessage = $state('');
-	let customerForm = $state({
-		name: '',
-		phone: '',
-		email: '',
-		notes: ''
-	});
-	let bikeForm = $state({
-		brand: '',
-		model: '',
-		year: '',
-		color: '',
-		serial_number: '',
-		notes: ''
-	});
+	let customerForm = $state({ ...emptyCustomerForm });
+	let bikeForm = $state({ ...emptyBikeForm });
+	let editingCustomerId = $state<string | null>(null);
+	let editingBikeId = $state<string | null>(null);
+	let ledgerBikeId = $state<string | null>(null);
+
+	const selectedCustomer = $derived(customers.find((customer) => customer.id === selectedCustomerId) ?? null);
 
 	onMount(async () => {
+		selectedCustomerId = page.url.searchParams.get('customer') ?? '';
 		await loadCustomers();
 	});
 
 	async function loadCustomers() {
 		isLoading = true;
-		errorMessage = '';
 
 		try {
 			customers = await getCustomers();
 
-			if (customers.length === 0) {
-				selectedCustomerId = '';
-				selectedCustomer = null;
-				bikes = [];
-				return;
+			if (!customers.some((customer) => customer.id === selectedCustomerId)) {
+				selectedCustomerId = customers[0]?.id ?? '';
 			}
-
-			if (!selectedCustomerId || !customers.some((customer) => customer.id === selectedCustomerId)) {
-				selectedCustomerId = customers[0].id;
-			}
-
-			selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId) ?? null;
 			await loadBikes();
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : String(error);
@@ -63,42 +66,68 @@
 	}
 
 	async function loadBikes() {
-		if (!selectedCustomerId) {
-			bikes = [];
-			selectedCustomer = null;
-			return;
-		}
-
-		bikes = await getBikesForCustomer(selectedCustomerId);
-		selectedCustomer = customers.find((customer) => customer.id === selectedCustomerId) ?? null;
+		bikes = selectedCustomerId ? await getBikesForCustomer(selectedCustomerId) : [];
 	}
 
-	async function handleCustomerSubmit(event: SubmitEvent) {
+	// One write at a time: the database connection is shared, so overlapping transactions would collide.
+	async function run(action: () => Promise<void>) {
+		if (busy) return;
+		busy = true;
+		errorMessage = '';
+		try {
+			await action();
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : String(error);
+		} finally {
+			busy = false;
+		}
+	}
+
+	function resetCustomerForm() {
+		editingCustomerId = null;
+		customerForm = { ...emptyCustomerForm };
+	}
+
+	function resetBikeForm() {
+		editingBikeId = null;
+		bikeForm = { ...emptyBikeForm };
+	}
+
+	function handleCustomerSubmit(event: SubmitEvent) {
 		event.preventDefault();
 		if (!customerForm.name.trim()) {
 			errorMessage = 'Customer name is required.';
 			return;
 		}
 
-		try {
-			const newCustomer = await createCustomer({
-				name: customerForm.name,
-				phone: customerForm.phone || null,
-				email: customerForm.email || null,
-				notes: customerForm.notes || null
-			});
+		const fields = {
+			name: customerForm.name,
+			phone: customerForm.phone || null,
+			email: customerForm.email || null,
+			notes: customerForm.notes || null
+		};
+		const editingId = editingCustomerId;
 
-			customerForm = { name: '', phone: '', email: '', notes: '' };
-			selectedCustomerId = newCustomer.id;
+		void run(async () => {
+			const saved = editingId ? await updateCustomer(editingId, fields) : await createCustomer(fields);
+			selectedCustomerId = saved.id;
+			resetCustomerForm();
 			await loadCustomers();
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : String(error);
-		}
+		});
 	}
 
-	async function handleBikeSubmit(event: SubmitEvent) {
+	function startEditCustomer(customer: Customer) {
+		editingCustomerId = customer.id;
+		customerForm = {
+			name: customer.name,
+			phone: customer.phone ?? '',
+			email: customer.email ?? '',
+			notes: customer.notes ?? ''
+		};
+	}
+
+	function handleBikeSubmit(event: SubmitEvent) {
 		event.preventDefault();
-		errorMessage = '';
 		if (!selectedCustomerId) {
 			errorMessage = 'Select a customer before adding a bike.';
 			return;
@@ -109,53 +138,77 @@
 			return;
 		}
 
-		try {
-			await createBike({
-				customer_id: selectedCustomerId,
-				brand: bikeForm.brand,
-				model: bikeForm.model,
-				year: bikeForm.year ? Number(bikeForm.year) : null,
-				color: bikeForm.color || null,
-				serial_number: bikeForm.serial_number || null,
-				notes: bikeForm.notes || null
-			});
-
-			bikeForm = { brand: '', model: '', year: '', color: '', serial_number: '', notes: '' };
-			await loadBikes();
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : String(error);
+		const year = bikeForm.year ? Number(bikeForm.year) : null;
+		if (year !== null && !Number.isInteger(year)) {
+			errorMessage = 'Bike year must be a whole number.';
+			return;
 		}
+
+		const fields = {
+			brand: bikeForm.brand,
+			model: bikeForm.model,
+			year,
+			color: bikeForm.color || null,
+			serial_number: bikeForm.serial_number || null,
+			notes: bikeForm.notes || null
+		};
+		const editingId = editingBikeId;
+		const customerId = selectedCustomerId;
+
+		void run(async () => {
+			if (editingId) {
+				await updateBike(editingId, fields);
+			} else {
+				await createBike({ customer_id: customerId, ...fields });
+			}
+			resetBikeForm();
+			await loadBikes();
+		});
 	}
 
-	async function handleDeleteCustomer(customerId: string) {
+	function startEditBike(bike: Bike) {
+		editingBikeId = bike.id;
+		bikeForm = {
+			brand: bike.brand,
+			model: bike.model,
+			year: bike.year === null ? '' : String(bike.year),
+			color: bike.color ?? '',
+			serial_number: bike.serial_number ?? '',
+			notes: bike.notes ?? ''
+		};
+	}
+
+	function handleDeleteBike(bike: Bike) {
+		if (!window.confirm(`Delete ${bike.brand} ${bike.model} and its work orders and service history?`)) return;
+
+		void run(async () => {
+			await deleteBike(bike.id);
+			if (editingBikeId === bike.id) resetBikeForm();
+			if (ledgerBikeId === bike.id) ledgerBikeId = null;
+			await loadBikes();
+		});
+	}
+
+	function handleDeleteCustomer(customerId: string) {
 		const target = customers.find((customer) => customer.id === customerId);
-		if (!target) {
-			return;
-		}
+		if (!target) return;
+		if (!window.confirm(`Delete ${target.name} and all associated bikes?`)) return;
 
-		const confirmed = window.confirm(`Delete ${target.name} and all associated bikes?`);
-		if (!confirmed) {
-			return;
-		}
-
-		errorMessage = '';
-		try {
+		void run(async () => {
 			await deleteCustomer(customerId);
-			if (selectedCustomerId === customerId) {
-				selectedCustomerId = '';
-				selectedCustomer = null;
-				bikes = [];
-			}
+			if (editingCustomerId === customerId) resetCustomerForm();
+			if (selectedCustomerId === customerId) selectedCustomerId = '';
 			await loadCustomers();
-		} catch (error) {
-			errorMessage = error instanceof Error ? error.message : String(error);
-		}
+		});
 	}
 
 	function selectCustomer(customerId: string) {
 		selectedCustomerId = customerId;
-		selectedCustomer = customers.find((customer) => customer.id === customerId) ?? null;
-		void loadBikes();
+		resetBikeForm();
+		ledgerBikeId = null;
+		void loadBikes().catch((error: unknown) => {
+			errorMessage = error instanceof Error ? error.message : String(error);
+		});
 	}
 </script>
 
@@ -164,7 +217,7 @@
 </svelte:head>
 
 <div class="min-h-screen bg-neutral-950 text-neutral-100">
-	<main class="mx-auto max-w-7xl p-6">
+	<main class="mx-auto max-w-7xl p-4 sm:p-6">
 		<header class="mb-8 flex flex-col gap-4 border-b border-neutral-800 pb-6 md:flex-row md:items-end md:justify-between">
 			<div>
 				<p class="text-xs uppercase tracking-[0.2em] text-amber-400">Customer intake</p>
@@ -176,63 +229,47 @@
 		</header>
 
 		{#if errorMessage}
-			<div class="mb-6 rounded-md border border-rose-800 bg-rose-950/30 px-4 py-3 text-sm text-rose-200">
-				{errorMessage}
-			</div>
+			<div class="mb-6 {errorBannerClass}">{errorMessage}</div>
 		{/if}
 
 		<div class="grid gap-6 lg:grid-cols-[390px_minmax(0,1fr)]">
-			<section class="rounded-xl border border-neutral-800 bg-neutral-900 p-5 shadow-lg shadow-black/20">
-				<h2 class="mb-4 text-lg font-semibold text-neutral-100">Add customer</h2>
+			<section class={cardClass}>
+				<h2 class="mb-4 text-lg font-semibold text-neutral-100">{editingCustomerId ? 'Edit customer' : 'Add customer'}</h2>
 				<form class="space-y-4" onsubmit={handleCustomerSubmit}>
 					<label class="block text-sm">
-						<span class="mb-1.5 block text-neutral-300">Name</span>
-						<input
-							bind:value={customerForm.name}
-							class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-							type="text"
-							placeholder="Miguel Rios"
-							required
-						/>
+						<span class={labelTextClass}>Name</span>
+						<input bind:value={customerForm.name} class={inputClass} type="text" placeholder="Miguel Rios" required />
 					</label>
 
 					<div class="grid gap-4 sm:grid-cols-2">
 						<label class="block text-sm">
-							<span class="mb-1.5 block text-neutral-300">Phone</span>
-							<input
-								bind:value={customerForm.phone}
-								class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-								type="tel"
-								placeholder="(555) 123-4567"
-							/>
+							<span class={labelTextClass}>Phone</span>
+							<input bind:value={customerForm.phone} class={inputClass} type="tel" placeholder="(555) 123-4567" />
 						</label>
 
 						<label class="block text-sm">
-							<span class="mb-1.5 block text-neutral-300">Email</span>
-							<input
-								bind:value={customerForm.email}
-								class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-								type="email"
-								placeholder="customer@example.com"
-							/>
+							<span class={labelTextClass}>Email</span>
+							<input bind:value={customerForm.email} class={inputClass} type="email" placeholder="customer@example.com" />
 						</label>
 					</div>
 
 					<label class="block text-sm">
-						<span class="mb-1.5 block text-neutral-300">Notes</span>
+						<span class={labelTextClass}>Notes</span>
 						<textarea
 							bind:value={customerForm.notes}
-							class="min-h-24 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
+							class="{inputClass} min-h-24"
 							placeholder="Service history, preferred contact method, repair notes..."
 						></textarea>
 					</label>
 
-					<button
-						type="submit"
-						class="w-full rounded-md bg-amber-500 px-4 py-2.5 font-semibold text-neutral-950 transition hover:bg-amber-400"
-					>
-						Save customer
-					</button>
+					<div class="flex gap-3">
+						<button type="submit" class="{primaryButton} flex-1" disabled={busy}>
+							{editingCustomerId ? 'Update customer' : 'Save customer'}
+						</button>
+						{#if editingCustomerId}
+							<button type="button" class={secondaryButton} onclick={resetCustomerForm}>Cancel</button>
+						{/if}
+					</div>
 				</form>
 
 				<div class="mt-7 border-t border-neutral-800 pt-5">
@@ -244,21 +281,16 @@
 					{:else}
 						<ul class="space-y-2">
 							{#each customers as customer (customer.id)}
-								<li class="flex items-center gap-2 rounded-md border border-neutral-800 bg-neutral-950/60 p-2">
+								<li>
 									<button
 										type="button"
-										class="flex-1 rounded-md px-2 py-2 text-left transition {selectedCustomerId === customer.id ? 'bg-amber-500/15 text-amber-200 ring-1 ring-amber-500/50' : 'text-neutral-200 hover:bg-neutral-800'}"
+										class="min-h-14 w-full rounded-md border px-3 py-2 text-left transition {selectedCustomerId === customer.id
+											? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
+											: 'border-neutral-800 bg-neutral-950/60 text-neutral-200 hover:bg-neutral-800'}"
 										onclick={() => selectCustomer(customer.id)}
 									>
 										<div class="font-medium">{customer.name}</div>
 										<div class="mt-1 text-xs text-neutral-400">{customer.phone || 'No phone on file'}</div>
-									</button>
-									<button
-										type="button"
-										class="rounded-md border border-rose-800 bg-rose-950/30 px-2 py-1.5 text-xs font-medium text-rose-200 transition hover:border-rose-700 hover:bg-rose-900/40"
-										onclick={() => handleDeleteCustomer(customer.id)}
-									>
-										Delete
 									</button>
 								</li>
 							{/each}
@@ -267,103 +299,84 @@
 				</div>
 			</section>
 
-			<section class="rounded-xl border border-neutral-800 bg-neutral-900 p-5 shadow-lg shadow-black/20">
+			<section class={cardClass}>
 				{#if selectedCustomer}
 					<div class="mb-6 flex flex-col gap-3 border-b border-neutral-800 pb-4 md:flex-row md:items-end md:justify-between">
 						<div>
 							<p class="text-xs uppercase tracking-[0.2em] text-amber-400">Selected customer</p>
 							<h2 class="mt-2 text-2xl font-bold text-neutral-50">{selectedCustomer.name}</h2>
+							<p class="mt-1 text-sm text-neutral-400">
+								{[selectedCustomer.phone, selectedCustomer.email].filter(Boolean).join(' · ') || 'No contact details'}
+							</p>
+							{#if selectedCustomer.notes}
+								<p class="mt-1 text-sm text-neutral-300">{selectedCustomer.notes}</p>
+							{/if}
 						</div>
-						<button
-							type="button"
-							class="rounded-md border border-rose-700 bg-rose-950/30 px-3 py-2 text-sm font-medium text-rose-200 transition hover:bg-rose-900/40"
-							onclick={() => {
-								if (selectedCustomer) {
-									handleDeleteCustomer(selectedCustomer.id);
-								}
-							}}
-						>
-							Delete customer
-						</button>
+						<div class="flex gap-2">
+							<button type="button" class={secondaryButton} onclick={() => selectedCustomer && startEditCustomer(selectedCustomer)}>
+								Edit customer
+							</button>
+							<button
+								type="button"
+								class={dangerButton}
+								disabled={busy}
+								onclick={() => selectedCustomer && handleDeleteCustomer(selectedCustomer.id)}
+							>
+								Delete customer
+							</button>
+						</div>
 					</div>
 
 					<div class="grid gap-6 xl:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
 						<form class="space-y-4" onsubmit={handleBikeSubmit}>
-							<h3 class="text-lg font-semibold text-neutral-100">Add bike</h3>
+							<h3 class="text-lg font-semibold text-neutral-100">{editingBikeId ? 'Edit bike' : 'Add bike'}</h3>
 
 							<div class="grid gap-4 sm:grid-cols-2">
 								<label class="block text-sm">
-									<span class="mb-1.5 block text-neutral-300">Brand</span>
-									<input
-										bind:value={bikeForm.brand}
-										class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-										type="text"
-										placeholder="Trek"
-										required
-									/>
+									<span class={labelTextClass}>Brand</span>
+									<input bind:value={bikeForm.brand} class={inputClass} type="text" placeholder="Trek" required />
 								</label>
 
 								<label class="block text-sm">
-									<span class="mb-1.5 block text-neutral-300">Model</span>
-									<input
-										bind:value={bikeForm.model}
-										class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-										type="text"
-										placeholder="Domane AL 3"
-										required
-									/>
+									<span class={labelTextClass}>Model</span>
+									<input bind:value={bikeForm.model} class={inputClass} type="text" placeholder="Domane AL 3" required />
 								</label>
 							</div>
 
 							<div class="grid gap-4 sm:grid-cols-3">
 								<label class="block text-sm">
-									<span class="mb-1.5 block text-neutral-300">Year</span>
-									<input
-										bind:value={bikeForm.year}
-										class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-										type="number"
-										min="1900"
-										max="2100"
-										placeholder="2023"
-									/>
+									<span class={labelTextClass}>Year</span>
+									<input bind:value={bikeForm.year} class={inputClass} type="number" inputmode="numeric" min="1900" max="2100" placeholder="2023" />
 								</label>
 
 								<label class="block text-sm">
-									<span class="mb-1.5 block text-neutral-300">Color</span>
-									<input
-										bind:value={bikeForm.color}
-										class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-										type="text"
-										placeholder="Black"
-									/>
+									<span class={labelTextClass}>Color</span>
+									<input bind:value={bikeForm.color} class={inputClass} type="text" placeholder="Black" />
 								</label>
 
 								<label class="block text-sm">
-									<span class="mb-1.5 block text-neutral-300">Serial</span>
-									<input
-										bind:value={bikeForm.serial_number}
-										class="w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
-										type="text"
-										placeholder="ABC123Z"
-									/>
+									<span class={labelTextClass}>Serial</span>
+									<input bind:value={bikeForm.serial_number} class={inputClass} type="text" placeholder="ABC123Z" />
 								</label>
 							</div>
 
 							<label class="block text-sm">
-								<span class="mb-1.5 block text-neutral-300">Notes</span>
+								<span class={labelTextClass}>Notes</span>
 								<textarea
 									bind:value={bikeForm.notes}
-									class="min-h-20 w-full rounded-md border border-neutral-700 bg-neutral-950 px-3 py-2 text-neutral-100 outline-none transition focus:border-amber-500"
+									class="{inputClass} min-h-20"
 									placeholder="Needs front wheel truing. Owner reports clicking under load."
 								></textarea>
 							</label>
 
-							<button
-								type="submit"
-								class="w-full rounded-md bg-emerald-500 px-4 py-2.5 font-semibold text-neutral-950 transition hover:bg-emerald-400"
-							>
-								Save bike
-							</button>
+							<div class="flex gap-3">
+								<button type="submit" class="{successButton} flex-1" disabled={busy}>
+									{editingBikeId ? 'Update bike' : 'Save bike'}
+								</button>
+								{#if editingBikeId}
+									<button type="button" class={secondaryButton} onclick={resetBikeForm}>Cancel</button>
+								{/if}
+							</div>
 						</form>
 
 						<div class="space-y-3">
@@ -375,8 +388,8 @@
 							{:else}
 								<div class="space-y-3">
 									{#each bikes as bike (bike.id)}
-										<article class="rounded-lg border border-neutral-800 bg-neutral-950/60 p-4">
-											<div class="mb-2 flex items-start justify-between gap-3">
+										<article class="space-y-3 rounded-lg border border-neutral-800 bg-neutral-950/60 p-4">
+											<div class="flex items-start justify-between gap-3">
 												<div>
 													<h4 class="text-lg font-semibold text-neutral-100">{bike.brand} {bike.model}</h4>
 													<p class="text-xs uppercase tracking-[0.15em] text-neutral-500">{bike.year || 'Year unknown'}</p>
@@ -393,6 +406,24 @@
 													<p><span class="text-neutral-500">Notes:</span> {bike.notes}</p>
 												{/if}
 											</div>
+
+											<div class="flex flex-wrap gap-2">
+												<a href="{resolve('/work-orders/new')}?bike={bike.id}" class={primaryButton}>New work order</a>
+												<button
+													type="button"
+													class={secondaryButton}
+													aria-expanded={ledgerBikeId === bike.id}
+													onclick={() => (ledgerBikeId = ledgerBikeId === bike.id ? null : bike.id)}
+												>
+													Service history
+												</button>
+												<button type="button" class={secondaryButton} onclick={() => startEditBike(bike)}>Edit</button>
+												<button type="button" class={dangerButton} disabled={busy} onclick={() => handleDeleteBike(bike)}>Delete</button>
+											</div>
+
+											{#if ledgerBikeId === bike.id}
+												<BikeLedger bikeId={bike.id} />
+											{/if}
 										</article>
 									{/each}
 								</div>

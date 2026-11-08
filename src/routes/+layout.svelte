@@ -16,11 +16,12 @@
 	<link rel="icon" href={favicon} />
 </svelte:head>
 
-<header class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-neutral-800 bg-workshop-dark px-6 py-3">
-	<nav class="flex items-center gap-5 text-sm font-medium text-neutral-300">
-		<a href={resolve('/')} class="font-bold text-amber-500 hover:text-amber-400">bike-mechanic-pad</a>
-		<a href={resolve('/customers')} class="hover:text-white">Customers</a>
-		<a href={resolve('/settings')} class="hover:text-white">Settings</a>
+<header class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-neutral-800 bg-workshop-dark px-4 py-2 sm:px-6">
+	<nav class="flex items-center gap-1 text-base font-medium text-neutral-300 sm:gap-2">
+		<a href={resolve('/')} class="flex min-h-12 items-center rounded-md px-3 font-bold text-amber-500 hover:text-amber-400">bike-mechanic-pad</a>
+		<a href={resolve('/')} class="flex min-h-12 items-center rounded-md px-3 hover:bg-neutral-800 hover:text-white">Work orders</a>
+		<a href={resolve('/customers')} class="flex min-h-12 items-center rounded-md px-3 hover:bg-neutral-800 hover:text-white">Customers</a>
+		<a href={resolve('/settings')} class="flex min-h-12 items-center rounded-md px-3 hover:bg-neutral-800 hover:text-white">Settings</a>
 	</nav>
 	<a href={resolve('/settings')} aria-label="Sync settings"><SyncStatusPill /></a>
 </header>

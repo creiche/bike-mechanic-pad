@@ -21,9 +21,14 @@ import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
 import {
 	createBike,
 	createCustomer,
+	deleteBike,
 	deleteCustomer,
+	getBike,
 	getBikesForCustomer,
-	getCustomers
+	getCustomer,
+	getCustomers,
+	updateBike,
+	updateCustomer
 } from './repositories';
 
 const sqlite3 = await sqlite3InitModule();
@@ -120,4 +125,55 @@ describe('customers and bikes', () => {
 
 		expect(db.exec('SELECT seq FROM sync_outbox', { returnValue: 'resultRows' })).toEqual([]);
 	});
+
+	it('updates a customer, queues the full row, and notifies once', async () => {
+		const ana = await createCustomer({ name: 'Ana', phone: '555-0100' });
+		const listener = vi.fn();
+		const off = onLocalWrite(listener);
+
+		const updated = await updateCustomer(ana.id, { name: ' Ana Ruiz ', email: 'ana@example.com' });
+
+		expect(updated).toMatchObject({ name: 'Ana Ruiz', email: 'ana@example.com', phone: null });
+		expect(await getCustomer(ana.id)).toEqual(updated);
+		expect(listener).toHaveBeenCalledOnce();
+		const [row] = outboxRows().slice(-1);
+		expect([row.entity_type, row.action]).toEqual(['customer', 'UPDATE']);
+		expect(JSON.parse(row.payload)).toMatchObject({ id: ana.id, name: 'Ana Ruiz', created_at: ana.created_at });
+
+		off();
+	});
+
+	it('rejects updating a missing customer or blanking the name, with no outbox write', async () => {
+		const ana = await createCustomer({ name: 'Ana' });
+		const before = outboxRows().length;
+
+		await expect(updateCustomer(ana.id, { name: ' ' })).rejects.toThrow('Customer name is required.');
+		await expect(updateCustomer('missing', { name: 'X' })).rejects.toThrow('Customer not found.');
+
+		expect(outboxRows()).toHaveLength(before);
+	});
+
+	it('updates and deletes a bike and records both in the outbox', async () => {
+		const ana = await createCustomer({ name: 'Ana' });
+		const bike = await createBike({ customer_id: ana.id, brand: 'Trek', model: 'Domane' });
+
+		const updated = await updateBike(bike.id, { brand: 'Trek', model: 'Domane SL', year: 2024, color: 'Blue' });
+		expect(updated).toMatchObject({ model: 'Domane SL', year: 2024, color: 'Blue', customer_id: ana.id });
+
+		await deleteBike(bike.id);
+		expect(await getBike(bike.id)).toBeNull();
+		expect(await getCustomer(ana.id)).not.toBeNull();
+
+		expect(outboxRows().slice(-2).map((row) => [row.entity_type, row.action])).toEqual([
+			['bike', 'UPDATE'],
+			['bike', 'DELETE']
+		]);
+	});
 });
+
+function outboxRows() {
+	return db.exec('SELECT entity_type, entity_id, action, payload FROM sync_outbox ORDER BY seq', {
+		rowMode: 'object',
+		returnValue: 'resultRows'
+	}) as Array<{ entity_type: string; entity_id: string; action: string; payload: string }>;
+}

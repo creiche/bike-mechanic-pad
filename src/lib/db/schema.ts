@@ -120,5 +120,31 @@ CREATE INDEX IF NOT EXISTS idx_sync_outbox_seq ON sync_outbox(seq);
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_created_at ON sync_outbox(created_at);
 CREATE INDEX IF NOT EXISTS idx_peer_sync_state_last_seen_at ON peer_sync_state(last_seen_at);
 `
+  },
+  {
+    version: 5,
+    name: 'bike component ledger + line item component tag',
+    sql: `
+-- One row per (bike, component type); last_serviced_date is a local YYYY-MM-DD day.
+CREATE TABLE IF NOT EXISTS bike_components (
+  id TEXT PRIMARY KEY,
+  bike_id TEXT NOT NULL,
+  component_type TEXT NOT NULL,
+  last_serviced_date TEXT NOT NULL,
+  work_order_id TEXT,
+  notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  UNIQUE (bike_id, component_type),
+  FOREIGN KEY (bike_id) REFERENCES bikes(id) ON DELETE CASCADE,
+  FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bike_components_bike_id ON bike_components(bike_id);
+CREATE INDEX IF NOT EXISTS idx_bike_components_work_order_id ON bike_components(work_order_id);
+
+-- Tags a line item with the component it services; completing the work order stamps that component.
+ALTER TABLE work_order_items ADD COLUMN component_type TEXT;
+`
   }
 ];
