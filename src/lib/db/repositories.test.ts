@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { migrate } from './migrate';
+import { onLocalWrite } from './localWrites';
 
 // The real client talks to a browser worker with OPFS storage. For tests we replace it with a fresh
 // in-memory SQLite database (same engine, same schema, same PRAGMA) so the repository SQL is real.
@@ -34,6 +35,21 @@ beforeEach(() => {
 });
 
 describe('customers and bikes', () => {
+	it('notifies local-write listeners only after a successful commit', async () => {
+		const listener = vi.fn();
+		const off = onLocalWrite(listener);
+
+		await expect(createCustomer({ name: ' ' })).rejects.toThrow();
+		expect(listener).not.toHaveBeenCalled();
+
+		const customer = await createCustomer({ name: 'Ana' });
+		await createBike({ customer_id: customer.id, brand: 'Trek', model: 'Domane' });
+		await deleteCustomer(customer.id);
+		expect(listener).toHaveBeenCalledTimes(3);
+
+		off();
+	});
+
 	it('creates a customer with a client-generated UUID and trims the name', async () => {
 		const customer = await createCustomer({ name: '  Miguel Rios  ' });
 

@@ -1,5 +1,6 @@
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { openDatabase } from '../client';
+import { notifyLocalWrite } from '../localWrites';
 
 const WORK_ORDER_STATUSES = ['open', 'in_progress', 'ready_for_pickup', 'completed', 'cancelled'] as const;
 const WORK_ORDER_ITEM_TYPES = ['labor', 'part'] as const;
@@ -192,6 +193,7 @@ export async function createWorkOrder(input: CreateWorkOrderInput): Promise<Work
 		}
 		throw error;
 	}
+	notifyLocalWrite();
 
 	const [workOrder] = await selectRows<WorkOrderRow>('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
 	if (!workOrder) {

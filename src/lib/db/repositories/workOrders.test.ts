@@ -17,6 +17,7 @@ vi.mock('../client', () => {
 });
 
 import { createBike, createCustomer } from '../repositories';
+import { onLocalWrite } from '../localWrites';
 import { createWorkOrder } from './workOrders';
 
 const sqlite3 = await sqlite3InitModule();
@@ -31,6 +32,27 @@ beforeEach(() => {
 });
 
 describe('createWorkOrder', () => {
+	it('notifies local-write listeners once on success and not on a rolled-back write', async () => {
+		const customer = await createCustomer({ name: 'Ari' });
+		const bike = await createBike({ customer_id: customer.id, brand: 'Surly', model: 'Midnight Special' });
+		const listener = vi.fn();
+		const off = onLocalWrite(listener);
+
+		await expect(
+			createWorkOrder({
+				bike_id: bike.id,
+				issue_summary: 'Brake rub',
+				items: [{ item_type: 'part', description: 'Bolt', quantity: 0, unit_price_cents: 300 }]
+			})
+		).rejects.toThrow();
+		expect(listener).not.toHaveBeenCalled();
+
+		await createWorkOrder({ bike_id: bike.id, issue_summary: 'Brake rub', items: [] });
+		expect(listener).toHaveBeenCalledOnce();
+
+		off();
+	});
+
 	it('creates work order and items, computes total_cents, and writes an outbox event atomically', async () => {
 		const customer = await createCustomer({ name: 'Ari' });
 		const bike = await createBike({ customer_id: customer.id, brand: 'Surly', model: 'Midnight Special' });

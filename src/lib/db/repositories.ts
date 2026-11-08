@@ -1,5 +1,6 @@
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { openDatabase } from './client';
+import { notifyLocalWrite } from './localWrites';
 import { appendMutation } from './repositories/sync';
 import { inTransaction } from './transaction';
 
@@ -85,6 +86,7 @@ export async function createCustomer(input: CreateCustomerInput): Promise<Custom
 			}
 		});
 	});
+	notifyLocalWrite();
 
 	const [customer] = await selectRows<Customer>('SELECT * FROM customers WHERE id = ?', [customerId]);
 	if (!customer) {
@@ -129,6 +131,7 @@ export async function createBike(input: CreateBikeInput): Promise<Bike> {
 		);
 		await appendMutation({ entity_type: 'bike', entity_id: bikeId, action: 'INSERT', payload: bikeFields });
 	});
+	notifyLocalWrite();
 
 	const [bike] = await selectRows<Bike>('SELECT * FROM bikes WHERE id = ?', [bikeId]);
 	if (!bike) {
@@ -148,4 +151,5 @@ export async function deleteCustomer(customerId: string): Promise<void> {
 			payload: { id: customerId }
 		});
 	});
+	notifyLocalWrite();
 }

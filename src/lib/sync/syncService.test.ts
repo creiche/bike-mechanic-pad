@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { OutboxEntry, SyncRepository } from '../db/repositories/sync';
 import { CloudError, type CloudStorageAdapter, type RemoteFile } from './cloud/types';
 import { buildPacket, packetFileName, parsePacket } from './packet';
@@ -246,6 +246,51 @@ describe('SyncService status reporting', () => {
 		await service.syncNow();
 
 		expect(seen).toEqual(['idle', 'syncing', 'idle']);
+	});
+});
+
+describe('SyncService requestSync', () => {
+	afterEach(() => vi.useRealTimers());
+
+	it('batches a burst of requests into one cycle after the quiet window', async () => {
+		vi.useFakeTimers();
+		const { adapter, service } = setup();
+		const ensureFolder = vi.spyOn(adapter, 'ensureFolder');
+
+		service.requestSync();
+		await vi.advanceTimersByTimeAsync(1_500);
+		service.requestSync(); // restarts the window
+		await vi.advanceTimersByTimeAsync(1_500);
+		expect(ensureFolder).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(600);
+		expect(ensureFolder).toHaveBeenCalledTimes(1);
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(ensureFolder).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not reject or throw when the debounced cycle fails offline', async () => {
+		vi.useFakeTimers();
+		const { adapter, service } = setup();
+		adapter.failWith = new CloudError('offline', 'The device is offline.');
+
+		service.requestSync();
+		await vi.advanceTimersByTimeAsync(2_100);
+
+		expect(service.getState()).toMatchObject({ status: 'offline', error: { kind: 'offline' } });
+	});
+
+	it('drops a pending request on stop()', async () => {
+		vi.useFakeTimers();
+		const { adapter, service } = setup();
+		const ensureFolder = vi.spyOn(adapter, 'ensureFolder');
+
+		service.requestSync();
+		service.stop();
+		await vi.advanceTimersByTimeAsync(5_000);
+
+		expect(ensureFolder).not.toHaveBeenCalled();
 	});
 });
 
