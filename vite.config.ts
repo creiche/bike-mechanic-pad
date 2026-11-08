@@ -1,6 +1,7 @@
 import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import { defineConfig } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
 
 const opfsHeaders = {
 	name: 'opfs-headers',
@@ -30,10 +31,15 @@ export default defineConfig({
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
 
+			// Set BASE_PATH=/repo-name when hosted under a sub-path (GitHub Pages project site).
+			paths: { base: (process.env.BASE_PATH ?? '') as '' | `/${string}` },
+
 			// Static single-page app: no server, so the same build runs from a static host, as a PWA, or inside Tauri.
 			// Unknown paths fall back to index.html and the client router takes over.
 			adapter: adapter({ fallback: 'index.html' })
-		})
+		}),
+		tailwindcss()
+
 	],
 	server: {
 		headers: {

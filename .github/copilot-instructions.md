@@ -15,3 +15,7 @@
 - Focus on step-by-step modular code. Avoid massive monolith files.
 - Include clear TypeScript interfaces and explanatory comments for database operations so the codebase remains readable and easy to learn from.
 - UI styling must prioritize high-contrast dark mode suitable for a shop repair stand environment.
+
+# Agent Instructions
+- Prefer deep architectural analysis and complete code modifications over minimal patches.
+- For complex code changes or multi-file edits, explicitly reason through step-by-step implementations.

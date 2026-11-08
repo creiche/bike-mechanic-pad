@@ -19,8 +19,8 @@
   });
 </script>
 
-<main class="min-h-screen bg-neutral-950 text-neutral-100 p-8 flex flex-col justify-between">
-  <div class="max-w-xl mx-auto w-full space-y-6">
+<main class="min-h-screen bg-workshop-dark text-slate-100 p-6 flex flex-col justify-between">
+  <div class="max-w-xl mx-auto w-full bg-workshop-surface border border-workshop-border space-y-6">
     <header class="border-b border-neutral-800 pb-4">
       <h1 class="text-2xl font-bold tracking-tight text-amber-500">bike-mechanic-pad</h1>
       <p class="text-sm text-neutral-400">Local-First Digital Clipboard for Solo Mechanics</p>

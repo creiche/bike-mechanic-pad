@@ -4,6 +4,9 @@
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<meta name="text-scale" content="scale" />
+		<!-- Hosts that cannot send COOP/COEP headers (GitHub Pages) get them from this service worker.
+		     It does nothing when the page is already cross-origin isolated. Must stay a classic script. -->
+		<script src="%sveltekit.assets%/coi-serviceworker.js"></script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

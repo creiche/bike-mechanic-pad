@@ -1,4 +1,4 @@
-import { MIGRATIONS } from './schema';
+import { MIGRATIONS, type Migration } from './schema';
 
 // Minimal view of the database, shared by the OPFS worker and the tests.
 export interface MigratableDb {
@@ -8,7 +8,7 @@ export interface MigratableDb {
 // Bring the database up to the latest schema version. Safe to run on every start.
 // The version number lives inside the database file (PRAGMA user_version, 0 for a brand-new file),
 // so it always travels with the user's data.
-export function migrate(db: MigratableDb, migrations: string[] = MIGRATIONS): void {
+export function migrate(db: MigratableDb, migrations: Migration[] = MIGRATIONS): void {
 	// One transaction for the whole run. IMMEDIATE takes the write lock BEFORE the version is read, so a
 	// second tab starting at the same time waits, then sees the new version and has nothing left to do.
 	// A failure rolls everything back, and the version only moves when all the SQL succeeded.
@@ -25,9 +25,18 @@ export function migrate(db: MigratableDb, migrations: string[] = MIGRATIONS): vo
 			);
 		}
 
+		for (let index = 0; index < migrations.length; index++) {
+			const expected = index + 1;
+			if (migrations[index].version !== expected) {
+				throw new Error(
+					`Invalid migration order: expected version ${expected} at index ${index}, got ${migrations[index].version}.`
+				);
+			}
+		}
+
 		for (let version = current + 1; version <= migrations.length; version++) {
 			step = `Migration ${version}`;
-			db.exec({ sql: migrations[version - 1] });
+			db.exec({ sql: migrations[version - 1].sql });
 		}
 		if (current < migrations.length) {
 			db.exec({ sql: `PRAGMA user_version = ${migrations.length}` }); // PRAGMA cannot take bound parameters
