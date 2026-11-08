@@ -1,7 +1,24 @@
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
-import { openDatabase } from '../client';
+import { openDatabase, type SqliteConnection } from '../client';
+import { inTransaction } from '../transaction';
 
 type DomainAction = 'INSERT' | 'UPDATE' | 'DELETE';
+
+// peer_sync_state holds two kinds of cursors. A push cursor counts OUR outbox seq already uploaded.
+// A pull cursor counts a REMOTE device's seq already applied here; it lives in another seq space,
+// so pruning must ignore it.
+const PULL_PEER_PREFIX = 'pull:';
+
+export const pushPeerId = (relayId: string): string => `relay:${relayId}`;
+export const pullPeerId = (deviceId: string): string => `${PULL_PEER_PREFIX}${deviceId}`;
+
+// Thrown when a remote delta is malformed or from a newer app version; retrying will not help.
+export class SyncProtocolError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'SyncProtocolError';
+	}
+}
 
 export interface OutboxEntry {
 	seq: number;
@@ -148,8 +165,9 @@ export async function pruneStaleOutboxLogs(retentionDays = 30, activeWithinDays 
 	const minActive = await selectOne<{ min_seq: number | null }>(
 		`SELECT MIN(last_synced_seq) AS min_seq
 		 FROM peer_sync_state
-		 WHERE julianday(last_seen_at) >= julianday('now', '-' || ? || ' days')`,
-		[activeWithinDays]
+		 WHERE julianday(last_seen_at) >= julianday('now', '-' || ? || ' days')
+		   AND peer_id NOT LIKE ?`,
+		[activeWithinDays, `${PULL_PEER_PREFIX}%`]
 	);
 
 	if (minActive?.min_seq == null) {
@@ -310,3 +328,256 @@ export async function importSnapshot(
 		throw error;
 	}
 }
+
+export async function getPeerState(peerId: string): Promise<PeerSyncState | null> {
+	return selectOne<PeerSyncState>('SELECT * FROM peer_sync_state WHERE peer_id = ?', [peerId]);
+}
+
+export interface ApplyRemoteResult {
+	applied: number;
+	// Events dropped because their parent row no longer exists locally (a delete won).
+	skipped: number;
+	lastSyncedSeq: number;
+}
+
+type Payload = Record<string, unknown>;
+
+function parsePayload(delta: OutboxEntry): Payload {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(delta.payload);
+	} catch {
+		throw new SyncProtocolError(`Delta ${delta.id} has an unreadable payload.`);
+	}
+	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+		throw new SyncProtocolError(`Delta ${delta.id} payload must be an object.`);
+	}
+	return parsed as Payload;
+}
+
+function requireString(payload: Payload, key: string): string {
+	const value = payload[key];
+	if (typeof value !== 'string') {
+		throw new SyncProtocolError(`Payload field "${key}" must be a string.`);
+	}
+	return value;
+}
+
+function optionalString(payload: Payload, key: string): string | null {
+	const value = payload[key];
+	if (value === undefined || value === null) return null;
+	if (typeof value !== 'string') {
+		throw new SyncProtocolError(`Payload field "${key}" must be a string.`);
+	}
+	return value;
+}
+
+function optionalInteger(payload: Payload, key: string): number | null {
+	const value = payload[key];
+	if (value === undefined || value === null) return null;
+	if (!Number.isSafeInteger(value)) {
+		throw new SyncProtocolError(`Payload field "${key}" must be an integer.`);
+	}
+	return value as number;
+}
+
+function requireInteger(payload: Payload, key: string): number {
+	const value = optionalInteger(payload, key);
+	if (value === null) {
+		throw new SyncProtocolError(`Payload field "${key}" must be an integer.`);
+	}
+	return value;
+}
+
+// Customers and bikes are create/delete only today, so the last event applied wins.
+async function applyCustomer(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
+	if (delta.action === 'DELETE') {
+		await connection.exec('DELETE FROM customers WHERE id = ?', { bind: [delta.entity_id] });
+		return;
+	}
+
+	const payload = parsePayload(delta);
+	await connection.exec(
+		`INSERT INTO customers (id, name, phone, email, notes, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   name = excluded.name, phone = excluded.phone, email = excluded.email, notes = excluded.notes`,
+		{
+			bind: [
+				requireString(payload, 'id'),
+				requireString(payload, 'name'),
+				optionalString(payload, 'phone'),
+				optionalString(payload, 'email'),
+				optionalString(payload, 'notes'),
+				optionalString(payload, 'created_at') ?? delta.created_at
+			]
+		}
+	);
+}
+
+async function applyBike(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
+	if (delta.action === 'DELETE') {
+		await connection.exec('DELETE FROM bikes WHERE id = ?', { bind: [delta.entity_id] });
+		return;
+	}
+
+	const payload = parsePayload(delta);
+	await connection.exec(
+		`INSERT INTO bikes (id, customer_id, brand, model, year, color, serial_number, notes, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   customer_id = excluded.customer_id, brand = excluded.brand, model = excluded.model,
+		   year = excluded.year, color = excluded.color, serial_number = excluded.serial_number,
+		   notes = excluded.notes`,
+		{
+			bind: [
+				requireString(payload, 'id'),
+				requireString(payload, 'customer_id'),
+				requireString(payload, 'brand'),
+				requireString(payload, 'model'),
+				optionalInteger(payload, 'year'),
+				optionalString(payload, 'color'),
+				optionalString(payload, 'serial_number'),
+				optionalString(payload, 'notes'),
+				optionalString(payload, 'created_at') ?? delta.created_at
+			]
+		}
+	);
+}
+
+// Work orders resolve conflicts by last-write-wins on updated_at (event time when the payload has none).
+async function applyWorkOrder(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
+	if (delta.action === 'DELETE') {
+		await connection.exec('DELETE FROM work_orders WHERE id = ?', { bind: [delta.entity_id] });
+		return;
+	}
+
+	const payload = parsePayload(delta);
+	const id = requireString(payload, 'id');
+	const updatedAt = optionalString(payload, 'updated_at') ?? delta.created_at;
+
+	const existing = await selectOne<{ updated_at: string }>('SELECT updated_at FROM work_orders WHERE id = ?', [id]);
+	if (existing && existing.updated_at > updatedAt) return;
+
+	const items = payload.items ?? [];
+	if (!Array.isArray(items)) {
+		throw new SyncProtocolError('Payload field "items" must be an array.');
+	}
+
+	await connection.exec(
+		`INSERT INTO work_orders (id, bike_id, status, issue_summary, notes, total_cents, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   bike_id = excluded.bike_id, status = excluded.status, issue_summary = excluded.issue_summary,
+		   notes = excluded.notes, total_cents = excluded.total_cents, updated_at = excluded.updated_at`,
+		{
+			bind: [
+				id,
+				requireString(payload, 'bike_id'),
+				requireString(payload, 'status'),
+				requireString(payload, 'issue_summary'),
+				optionalString(payload, 'notes'),
+				requireInteger(payload, 'total_cents'),
+				optionalString(payload, 'created_at') ?? delta.created_at,
+				updatedAt
+			]
+		}
+	);
+
+	await connection.exec('DELETE FROM work_order_items WHERE work_order_id = ?', { bind: [id] });
+	for (const raw of items) {
+		if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+			throw new SyncProtocolError('Work order items must be objects.');
+		}
+		const item = raw as Payload;
+		await connection.exec(
+			`INSERT INTO work_order_items (id, work_order_id, item_type, description, quantity, unit_price_cents)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			{
+				bind: [
+					requireString(item, 'id'),
+					id,
+					requireString(item, 'item_type'),
+					requireString(item, 'description'),
+					requireInteger(item, 'quantity'),
+					requireInteger(item, 'unit_price_cents')
+				]
+			}
+		);
+	}
+}
+
+function applyDelta(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
+	if (delta.action !== 'INSERT' && delta.action !== 'UPDATE' && delta.action !== 'DELETE') {
+		throw new SyncProtocolError(`Unknown action "${delta.action}".`);
+	}
+
+	switch (delta.entity_type) {
+		case 'customer':
+			return applyCustomer(connection, delta);
+		case 'bike':
+			return applyBike(connection, delta);
+		case 'work_order':
+			return applyWorkOrder(connection, delta);
+		default:
+			throw new SyncProtocolError(`Unknown entity type "${delta.entity_type}"; update the app to sync it.`);
+	}
+}
+
+function isForeignKeyError(error: unknown): boolean {
+	return error instanceof Error && /FOREIGN KEY/i.test(error.message);
+}
+
+// Apply a remote device's deltas and advance its pull cursor in ONE transaction, so a crash can never
+// leave rows applied without the cursor (or the reverse). Deltas at or below the cursor are ignored,
+// which makes retries and overlapping packets safe. Applied rows are NOT written to sync_outbox,
+// otherwise every change would echo back to the device that sent it.
+export async function applyRemoteDeltas(
+	peerId: string,
+	peerName: string,
+	deltas: OutboxEntry[]
+): Promise<ApplyRemoteResult> {
+	return inTransaction(async (connection) => {
+		const peer = await getPeerState(peerId);
+		let cursor = peer?.last_synced_seq ?? 0;
+		let applied = 0;
+		let skipped = 0;
+
+		for (const delta of [...deltas].sort((a, b) => a.seq - b.seq)) {
+			if (delta.seq <= cursor) continue;
+
+			await connection.exec('SAVEPOINT remote_delta');
+			try {
+				await applyDelta(connection, delta);
+				await connection.exec('RELEASE remote_delta');
+				applied++;
+			} catch (error) {
+				await connection.exec('ROLLBACK TO remote_delta');
+				await connection.exec('RELEASE remote_delta');
+				if (!isForeignKeyError(error)) throw error;
+				skipped++;
+			}
+			cursor = delta.seq;
+		}
+
+		await acknowledgeSync(peerId, peerName, cursor);
+		return { applied, skipped, lastSyncedSeq: cursor };
+	});
+}
+
+// The repository surface the sync service depends on; lets tests swap in a fake.
+export interface SyncRepository {
+	getSyncDelta: typeof getSyncDelta;
+	acknowledgeSync: typeof acknowledgeSync;
+	getPeerState: typeof getPeerState;
+	applyRemoteDeltas: typeof applyRemoteDeltas;
+	pruneStaleOutboxLogs: typeof pruneStaleOutboxLogs;
+}
+
+export const syncRepository: SyncRepository = {
+	getSyncDelta,
+	acknowledgeSync,
+	getPeerState,
+	applyRemoteDeltas,
+	pruneStaleOutboxLogs
+};

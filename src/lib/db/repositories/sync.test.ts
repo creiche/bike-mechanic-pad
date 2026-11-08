@@ -18,12 +18,17 @@ vi.mock('../client', () => {
 
 import {
 	acknowledgeSync,
+	applyRemoteDeltas,
 	appendMutation,
 	exportSnapshot,
+	getPeerState,
 	getSyncDelta,
 	importSnapshot,
 	pruneStaleOutboxLogs,
-	type DatabaseSnapshot
+	pullPeerId,
+	SyncProtocolError,
+	type DatabaseSnapshot,
+	type OutboxEntry
 } from './sync';
 import { createBike, createCustomer } from '../repositories';
 import { createWorkOrder } from './workOrders';
@@ -257,5 +262,106 @@ describe('sync repository', () => {
 
 		expect(queryRows('SELECT peer_name, last_synced_seq FROM peer_sync_state WHERE peer_id = ?', ['self-device']))
 			.toEqual([{ peer_name: 'My Device', last_synced_seq: 2 }]);
+	});
+});
+
+const remote = (seq: number, entity_type: string, action: string, entity_id: string, payload: object): OutboxEntry => ({
+	seq,
+	id: `evt-${seq}`,
+	entity_type,
+	entity_id,
+	action,
+	payload: JSON.stringify(payload),
+	created_at: '2026-11-07T10:00:00.000Z'
+});
+
+const remoteChain = (): OutboxEntry[] => [
+	remote(1, 'customer', 'INSERT', 'c1', { id: 'c1', name: 'Ana', phone: null, email: null, notes: null }),
+	remote(2, 'bike', 'INSERT', 'b1', { id: 'b1', customer_id: 'c1', brand: 'Trek', model: 'Domane' }),
+	remote(3, 'work_order', 'INSERT', 'w1', {
+		id: 'w1',
+		bike_id: 'b1',
+		status: 'open',
+		issue_summary: 'Squeak',
+		notes: null,
+		total_cents: 5000,
+		items: [{ id: 'i1', item_type: 'labor', description: 'Tune', quantity: 1, unit_price_cents: 5000 }]
+	})
+];
+
+describe('applyRemoteDeltas', () => {
+	it('applies deltas, advances the pull cursor, and does not echo into the outbox', async () => {
+		const result = await applyRemoteDeltas(pullPeerId('dev-b'), 'Shop iPad', remoteChain());
+
+		expect(result).toEqual({ applied: 3, skipped: 0, lastSyncedSeq: 3 });
+		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana' }]);
+		expect(queryRows('SELECT brand FROM bikes')).toEqual([{ brand: 'Trek' }]);
+		expect(queryRows('SELECT total_cents FROM work_orders')).toEqual([{ total_cents: 5000 }]);
+		expect(queryRows('SELECT description FROM work_order_items')).toEqual([{ description: 'Tune' }]);
+		expect(queryRows('SELECT id FROM sync_outbox')).toEqual([]);
+		expect((await getPeerState(pullPeerId('dev-b')))?.last_synced_seq).toBe(3);
+	});
+
+	it('is idempotent: replaying the same deltas applies nothing', async () => {
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'Shop iPad', remoteChain());
+		const replay = await applyRemoteDeltas(pullPeerId('dev-b'), 'Shop iPad', remoteChain());
+
+		expect(replay).toEqual({ applied: 0, skipped: 0, lastSyncedSeq: 3 });
+		expect(queryRows('SELECT id FROM work_order_items')).toHaveLength(1);
+	});
+
+	it('keeps the newer work order when an older update arrives (last write wins)', async () => {
+		const base = { id: 'w1', bike_id: 'b1', status: 'open', notes: null, total_cents: 0, items: [] };
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', remoteChain().slice(0, 2));
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [
+			remote(3, 'work_order', 'UPDATE', 'w1', { ...base, issue_summary: 'newer', updated_at: '2026-11-07T12:00:00.000Z' })
+		]);
+		await applyRemoteDeltas(pullPeerId('dev-c'), 'C', [
+			remote(1, 'work_order', 'UPDATE', 'w1', { ...base, issue_summary: 'older', updated_at: '2026-11-07T11:00:00.000Z' })
+		]);
+
+		expect(queryRows('SELECT issue_summary FROM work_orders')).toEqual([{ issue_summary: 'newer' }]);
+	});
+
+	it('skips events whose parent was deleted and still advances the cursor', async () => {
+		const result = await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [remoteChain()[1]]);
+
+		expect(result).toEqual({ applied: 0, skipped: 1, lastSyncedSeq: 2 });
+		expect(queryRows('SELECT id FROM bikes')).toEqual([]);
+	});
+
+	it('applies DELETE events', async () => {
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', remoteChain());
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [remote(4, 'customer', 'DELETE', 'c1', { id: 'c1' })]);
+
+		expect(queryRows('SELECT id FROM customers')).toEqual([]);
+		expect(queryRows('SELECT id FROM work_orders')).toEqual([]);
+	});
+
+	it('rolls back the whole batch and keeps the cursor when a delta is malformed', async () => {
+		const batch = [remoteChain()[0], remote(2, 'customer', 'INSERT', 'c2', { id: 'c2' })];
+
+		await expect(applyRemoteDeltas(pullPeerId('dev-b'), 'B', batch)).rejects.toBeInstanceOf(SyncProtocolError);
+		expect(queryRows('SELECT id FROM customers')).toEqual([]);
+		expect(await getPeerState(pullPeerId('dev-b'))).toBeNull();
+	});
+
+	it('rejects unknown entity types instead of silently dropping them', async () => {
+		await expect(
+			applyRemoteDeltas(pullPeerId('dev-b'), 'B', [remote(1, 'invoice', 'INSERT', 'x', {})])
+		).rejects.toThrow('Unknown entity type');
+	});
+
+	it('pruning ignores pull cursors, which live in another seq space', async () => {
+		db.exec(
+			"INSERT INTO sync_outbox (id, entity_type, entity_id, action, payload, created_at) VALUES ('e1', 'customer', 'c', 'INSERT', '{}', '2020-01-01T00:00:00.000Z')"
+		);
+		db.exec(
+			"INSERT INTO sync_outbox (id, entity_type, entity_id, action, payload, created_at) VALUES ('e2', 'customer', 'c', 'INSERT', '{}', '2020-01-02T00:00:00.000Z')"
+		);
+		await acknowledgeSync('relay:dropbox', 'Dropbox', 2);
+		await acknowledgeSync(pullPeerId('dev-b'), 'B', 0);
+
+		expect(await pruneStaleOutboxLogs(30, 30)).toBe(2);
 	});
 });

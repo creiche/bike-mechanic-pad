@@ -80,4 +80,28 @@ describe('customers and bikes', () => {
 		expect(await getBikesForCustomer(ana.id)).toEqual([]);
 		expect(await getBikesForCustomer(ben.id)).toHaveLength(1);
 	});
+
+	it('records customer and bike mutations in the sync outbox', async () => {
+		const ana = await createCustomer({ name: 'Ana' });
+		const bike = await createBike({ customer_id: ana.id, brand: 'Trek', model: 'Domane', year: 2022 });
+		await deleteCustomer(ana.id);
+
+		const rows = db.exec('SELECT entity_type, entity_id, action, payload FROM sync_outbox ORDER BY seq', {
+			rowMode: 'object',
+			returnValue: 'resultRows'
+		}) as Array<{ entity_type: string; entity_id: string; action: string; payload: string }>;
+
+		expect(rows.map((row) => [row.entity_type, row.entity_id, row.action])).toEqual([
+			['customer', ana.id, 'INSERT'],
+			['bike', bike.id, 'INSERT'],
+			['customer', ana.id, 'DELETE']
+		]);
+		expect(JSON.parse(rows[1].payload)).toMatchObject({ customer_id: ana.id, brand: 'Trek', year: 2022 });
+	});
+
+	it('writes no outbox entry when the domain insert fails', async () => {
+		await expect(createBike({ customer_id: 'missing', brand: 'Trek', model: 'Domane' })).rejects.toThrow();
+
+		expect(db.exec('SELECT seq FROM sync_outbox', { returnValue: 'resultRows' })).toEqual([]);
+	});
 });

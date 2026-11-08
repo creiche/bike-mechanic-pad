@@ -168,7 +168,8 @@ BYOS is the current transport baseline. Any future transport (including P2P) mus
 Current implementation focus is the database/repository layer (`sync_outbox`, peer cursors, pruning, snapshots).
 
 - **Implemented now:** append-only outbox + peer cursor model in SQLite.
-- **Planned next:** BYOS transport orchestrator that consumes the repository APIs.
+- **Also implemented:** BYOS transport (`src/lib/sync/`): `CloudStorageAdapter` interface, Dropbox adapter with OAuth PKCE, and `SyncService` (push, pull, prune; status `idle | syncing | offline | error`; polling, debounce, backoff). Push cursors are `relay:<provider>` rows and pull cursors are `pull:<deviceId>` rows in `peer_sync_state`; pruning ignores pull cursors. Remote deltas are applied with `applyRemoteDeltas()` (one transaction, cursor included, no outbox echo). Customer and bike mutations are now written to the outbox too.
+- **Not yet:** packet encryption, remote packet cleanup, snapshot bootstrap trigger, settings UI.
 - **Future option:** P2P WebRTC fallback transport, only if needed after BYOS workflow is stable.
 
 ### 2.5 Near Real-Time Sync Profile (BYOS)

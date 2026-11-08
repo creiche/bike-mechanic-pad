@@ -1,5 +1,7 @@
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
-import { openDatabase, runQuery } from './client';
+import { openDatabase } from './client';
+import { appendMutation } from './repositories/sync';
+import { inTransaction } from './transaction';
 
 export interface Customer {
 	id: string;
@@ -66,10 +68,23 @@ export async function createCustomer(input: CreateCustomerInput): Promise<Custom
 		throw new Error('Customer name is required.');
 	}
 
-	await runQuery(
-		`INSERT INTO customers (id, name, phone, email, notes) VALUES (?, ?, ?, ?, ?)`,
-		[customerId, name, input.phone ?? null, input.email ?? null, input.notes ?? null]
-	);
+	await inTransaction(async (connection) => {
+		await connection.exec(`INSERT INTO customers (id, name, phone, email, notes) VALUES (?, ?, ?, ?, ?)`, {
+			bind: [customerId, name, input.phone ?? null, input.email ?? null, input.notes ?? null]
+		});
+		await appendMutation({
+			entity_type: 'customer',
+			entity_id: customerId,
+			action: 'INSERT',
+			payload: {
+				id: customerId,
+				name,
+				phone: input.phone ?? null,
+				email: input.email ?? null,
+				notes: input.notes ?? null
+			}
+		});
+	});
 
 	const [customer] = await selectRows<Customer>('SELECT * FROM customers WHERE id = ?', [customerId]);
 	if (!customer) {
@@ -95,20 +110,25 @@ export async function createBike(input: CreateBikeInput): Promise<Bike> {
 		throw new Error('Bike brand and model are required.');
 	}
 
-	await runQuery(
-		`INSERT INTO bikes (id, customer_id, brand, model, year, color, serial_number, notes)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		[
-			bikeId,
-			input.customer_id,
-			brand,
-			model,
-			input.year ?? null,
-			input.color ?? null,
-			input.serial_number ?? null,
-			input.notes ?? null
-		]
-	);
+	const bikeFields = {
+		id: bikeId,
+		customer_id: input.customer_id,
+		brand,
+		model,
+		year: input.year ?? null,
+		color: input.color ?? null,
+		serial_number: input.serial_number ?? null,
+		notes: input.notes ?? null
+	};
+
+	await inTransaction(async (connection) => {
+		await connection.exec(
+			`INSERT INTO bikes (id, customer_id, brand, model, year, color, serial_number, notes)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			{ bind: Object.values(bikeFields) }
+		);
+		await appendMutation({ entity_type: 'bike', entity_id: bikeId, action: 'INSERT', payload: bikeFields });
+	});
 
 	const [bike] = await selectRows<Bike>('SELECT * FROM bikes WHERE id = ?', [bikeId]);
 	if (!bike) {
@@ -119,5 +139,13 @@ export async function createBike(input: CreateBikeInput): Promise<Bike> {
 }
 
 export async function deleteCustomer(customerId: string): Promise<void> {
-	await runQuery('DELETE FROM customers WHERE id = ?', [customerId]);
+	await inTransaction(async (connection) => {
+		await connection.exec('DELETE FROM customers WHERE id = ?', { bind: [customerId] });
+		await appendMutation({
+			entity_type: 'customer',
+			entity_id: customerId,
+			action: 'DELETE',
+			payload: { id: customerId }
+		});
+	});
 }

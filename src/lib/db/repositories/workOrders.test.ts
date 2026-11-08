@@ -69,7 +69,7 @@ describe('createWorkOrder', () => {
 
 		expect(queryRows('SELECT id FROM work_orders')).toHaveLength(0);
 		expect(queryRows('SELECT id FROM work_order_items')).toHaveLength(0);
-		expect(queryRows('SELECT id FROM sync_outbox')).toHaveLength(0);
+		expect(queryRows("SELECT id FROM sync_outbox WHERE entity_type = 'work_order'")).toHaveLength(0);
 	});
 
 	it('rolls back all writes when SQL fails after transaction begins', async () => {
@@ -107,6 +107,6 @@ describe('createWorkOrder', () => {
 
 		expect(queryRows('SELECT id FROM work_orders')).toHaveLength(0);
 		expect(queryRows('SELECT id FROM work_order_items')).toHaveLength(0);
-		expect(queryRows('SELECT id FROM sync_outbox')).toHaveLength(0);
+		expect(queryRows("SELECT id FROM sync_outbox WHERE entity_type = 'work_order'")).toHaveLength(0);
 	});
 });
