@@ -78,7 +78,10 @@
 
 	function clearDatabase() {
 		void run(async () => {
-			await clearLocalDatabase();
+			const identity = syncService.getIdentity();
+			const clear = () => clearLocalDatabase(`pull:${identity.deviceId}`, identity.deviceName);
+			// Same reason as restore: a running sync could move a pull cursor past history the rebuild needs.
+			await (navigator.locks ? navigator.locks.request(LOCK_NAME, clear) : clear());
 			confirmText = '';
 			return 'Local database cleared.';
 		});
@@ -114,7 +117,7 @@
 
 		<section class={cardClass} aria-label="Restore">
 			<h2 class="text-lg font-semibold">Restore</h2>
-			<p class="mb-4 mt-1 text-sm text-neutral-400">Replaces everything on this device with the contents of a backup file. The file is checked first; a bad file changes nothing. If sync is on, newer changes from your other devices come back on the next sync.</p>
+			<p class="mb-4 mt-1 text-sm text-neutral-400">Replaces everything on this device with the contents of a backup file. The file is checked first; a bad file changes nothing. If sync is on, restored records are shared with your other devices, and anything newer than the backup, from this device or the others, comes back on the next sync.</p>
 			<label class="block text-sm">
 				<span class={labelTextClass}>Restore from Backup</span>
 				<input class={inputClass} type="file" accept="application/json,.json" disabled={busy} onchange={restoreFromFile} />
@@ -123,7 +126,7 @@
 
 		<section class="{cardClass} border-rose-900" aria-label="Clear database">
 			<h2 class="text-lg font-semibold text-rose-300">Clear local database</h2>
-			<p class="mb-4 mt-1 text-sm text-neutral-400">Deletes all shop data on this device. Export a backup first; this cannot be undone.</p>
+			<p class="mb-4 mt-1 text-sm text-neutral-400">Deletes all shop data on this device. Export a backup first; this cannot be undone. If sync is on, this device refills from Dropbox on the next sync.</p>
 			<label class="mb-4 block text-sm">
 				<span class={labelTextClass}>Type DELETE to confirm</span>
 				<input class={inputClass} type="text" bind:value={confirmText} autocomplete="off" autocapitalize="off" spellcheck="false" />

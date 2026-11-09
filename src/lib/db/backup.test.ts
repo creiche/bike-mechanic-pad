@@ -27,8 +27,9 @@ import {
 	validateSnapshot
 } from './backup';
 import { onLocalWrite } from './localWrites';
-import { createBike, createCustomer } from './repositories';
+import { createBike, createCustomer, getCustomers } from './repositories';
 import { createWorkOrder } from './repositories/workOrders';
+import { inTransaction } from './transaction';
 
 const sqlite3 = await sqlite3InitModule();
 const queryRows = (sql: string) => db.exec(sql, { rowMode: 'object', returnValue: 'resultRows' }) as Array<Record<string, unknown>>;
@@ -83,7 +84,10 @@ describe('validateSnapshot', () => {
 		['orphan bike', (s) => (s.data.bikes[0].customer_id = 'nope'), /missing customers/],
 		['duplicate id', (s) => s.data.customers.push({ ...s.data.customers[0] }), /repeats id/],
 		['bad ledger date', (s) => (s.data.bike_components[0].last_serviced_date = '2026-13-40'), /YYYY-MM-DD/],
-		['newer schema', (s) => (s.version = 999), /newer app/]
+		['newer schema', (s) => (s.version = 999), /newer app/],
+		['unsafe year', (s) => (s.data.bikes[0].year = 1e20), /invalid year/],
+		['non-text notes', (s) => (s.data.customers[0].notes = 5), /invalid "notes"/],
+		['unknown delete entity', (s) => s.data.outbox.push({ id: 'x', action: 'DELETE', entity_type: 'nope', entity_id: 'y' }), /valid delete/]
 	])('rejects %s', async (_name, mutate, message) => {
 		await seedShop();
 		const snapshot = JSON.parse(JSON.stringify(await parsed()));
@@ -102,7 +106,7 @@ describe('restoreBackup', () => {
 	it('restores into a wiped database and notifies once', async () => {
 		await seedShop();
 		const json = await createBackupJson();
-		await clearLocalDatabase();
+		await clearLocalDatabase('pull:self', 'Self');
 		expect(queryRows('SELECT id FROM customers')).toEqual([]);
 
 		const listener = vi.fn();
@@ -140,14 +144,37 @@ describe('restoreBackup', () => {
 	});
 });
 
+describe('reads during a write', () => {
+	it('waits for the running transaction instead of seeing its uncommitted rows', async () => {
+		let finish = () => {};
+		const held = new Promise<void>((resolve) => (finish = resolve));
+		const write = inTransaction(async (connection) => {
+			await connection.exec(`INSERT INTO customers (id, name) VALUES ('c1', 'Uncommitted')`);
+			await held;
+			throw new Error('roll back');
+		});
+
+		const read = getCustomers();
+		finish();
+
+		await expect(write).rejects.toThrow('roll back');
+		expect(await read).toEqual([]);
+	});
+});
+
 describe('clearLocalDatabase / pending count', () => {
 	it('wipes shop data but keeps the outbox, and counts unsynced entries', async () => {
 		await seedShop();
 		const before = await countPendingOutbox();
 		expect(before).toBeGreaterThan(0);
-		await clearLocalDatabase();
+		db.exec("INSERT INTO peer_sync_state (peer_id, peer_name, last_synced_seq) VALUES ('pull:phone', 'Phone', 7)");
+		await clearLocalDatabase('pull:self', 'Self');
 		expect(queryRows('SELECT id FROM bikes')).toEqual([]);
 		expect(await countPendingOutbox()).toBe(before);
+		// Every pull restarts from zero, including this device's own packets, so the next sync can rebuild it all.
+		expect(queryRows("SELECT peer_id, last_synced_seq FROM peer_sync_state WHERE peer_id LIKE 'pull:%'")).toEqual([
+			{ peer_id: 'pull:self', last_synced_seq: 0 }
+		]);
 
 		const tip = (queryRows('SELECT MAX(seq) AS tip FROM sync_outbox')[0].tip as number) ?? 0;
 		db.exec("INSERT INTO peer_sync_state (peer_id, peer_name, last_synced_seq) VALUES ('relay:dropbox', 'Dropbox', ?)", {

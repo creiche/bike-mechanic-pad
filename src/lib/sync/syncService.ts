@@ -251,10 +251,14 @@ export class SyncService {
 	// Apply packets from other devices, oldest first per device. One device's bad packet stops only that device.
 	private async pullPhase(): Promise<Pick<SyncCycleSummary, 'pulledPackets' | 'appliedDeltas' | 'skippedDeltas' | 'droppedOrphans'>> {
 		const files = await this.adapter.listFiles(this.folderPath);
+		const selfPeerId = pullPeerId(this.identity.deviceId);
+		// This device's own packets are only read after a restore or clear, which leave a cursor for them. Push runs
+		// first, so restored rows replay after any delete in the replayed history and bring those records back.
+		const replayingOwn = (await this.repository.getPeerState(selfPeerId)) !== null;
 		const byDevice = new Map<string, PacketRef[]>();
 		for (const file of files) {
 			const ref = parsePacketFileName(file.name);
-			if (!ref || ref.deviceId === this.identity.deviceId) continue;
+			if (!ref || (ref.deviceId === this.identity.deviceId && !replayingOwn)) continue;
 			byDevice.set(ref.deviceId, [...(byDevice.get(ref.deviceId) ?? []), ref]);
 		}
 
@@ -303,6 +307,10 @@ export class SyncService {
 			});
 			appliedDeltas += result.applied;
 			this.droppedOrphans += result.dropped;
+		}
+
+		if (replayingOwn && !stalled.some((entry) => entry.peerId === selfPeerId)) {
+			await this.repository.deletePeerState(selfPeerId);
 		}
 
 		return { pulledPackets, appliedDeltas, skippedDeltas, droppedOrphans: this.droppedOrphans };

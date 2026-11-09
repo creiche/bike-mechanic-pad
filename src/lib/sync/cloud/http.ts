@@ -18,7 +18,10 @@ export async function fetchWithTimeout(
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	try {
-		return await fetchImpl(url, { ...init, signal: controller.signal });
+		const response = await fetchImpl(url, { ...init, signal: controller.signal });
+		// Read the body while the timer runs, so a download that stalls after the headers also times out.
+		await response.clone().arrayBuffer();
+		return response;
 	} catch (error) {
 		if (controller.signal.aborted) {
 			throw new CloudError('timeout', `Request timed out after ${timeoutMs} ms.`, { cause: error });

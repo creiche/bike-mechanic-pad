@@ -66,6 +66,9 @@ function fakeRepository(outbox: OutboxEntry[] = []) {
 				? { peer_id: peerId, peer_name: '', last_synced_seq: cursors.get(peerId)!, last_seen_at: '' }
 				: null
 		),
+		deletePeerState: vi.fn(async (peerId: string) => {
+			cursors.delete(peerId);
+		}),
 		applyRemoteDeltas: vi.fn(async (peerId: string, _name: string, deltas: OutboxEntry[], _options?: ApplyRemoteOptions): Promise<ApplyRemoteResult> => {
 			const last = Math.max(...deltas.map((row) => row.seq));
 			cursors.set(peerId, last);
@@ -187,6 +190,37 @@ describe('SyncService pull phase', () => {
 			['pull:dev-peer', 'Office Mac', 3]
 		]);
 		expect(repository.applyRemoteDeltas.mock.calls.some(([peerId]) => peerId === 'pull:dev-self')).toBe(false);
+	});
+
+	it('replays its own packets once after a restore, starting from the restore cursor', async () => {
+		const { adapter, repository, cursors, service } = setup();
+		const own = buildPacket(self, [delta(3), delta(4)]);
+		adapter.files.set(packetFileName(own), JSON.stringify(own));
+		cursors.set('pull:dev-self', 2);
+
+		await service.syncNow();
+		expect(repository.applyRemoteDeltas.mock.calls.map(([peerId]) => peerId)).toEqual(['pull:dev-self']);
+		expect(repository.deletePeerState).toHaveBeenCalledWith('pull:dev-self');
+
+		await service.syncNow();
+		expect(repository.applyRemoteDeltas).toHaveBeenCalledTimes(1);
+	});
+
+	it('keeps the replay cursor when its own packet is still blocked', async () => {
+		const { adapter, repository, cursors, service } = setup();
+		const own = buildPacket(self, [delta(3)]);
+		adapter.files.set(packetFileName(own), JSON.stringify(own));
+		cursors.set('pull:dev-self', 2);
+		repository.applyRemoteDeltas.mockImplementation(async () => ({
+			applied: 1,
+			blocked: true,
+			blockedAt: '2026-01-01T00:00:00.000Z',
+			dropped: 0,
+			lastSyncedSeq: 2
+		}));
+
+		await service.syncNow();
+		expect(repository.deletePeerState).not.toHaveBeenCalled();
 	});
 
 	it('skips packets at or below the peer watermark', async () => {

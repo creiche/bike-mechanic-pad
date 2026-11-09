@@ -25,9 +25,9 @@ export interface LogComponentServiceInput {
 }
 
 export function getBikeComponents(bikeId: string): Promise<BikeComponent[]> {
-	return selectRows<BikeComponent>('SELECT * FROM bike_components WHERE bike_id = ? ORDER BY component_type ASC', [
-		bikeId
-	]);
+	return inTransaction(() =>
+		selectRows<BikeComponent>('SELECT * FROM bike_components WHERE bike_id = ? ORDER BY component_type ASC', [bikeId])
+	);
 }
 
 // Insert or update the ledger row for (bike, component type) and queue it for sync.

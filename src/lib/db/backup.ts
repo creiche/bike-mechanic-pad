@@ -1,5 +1,4 @@
 import { isComponentType, isServiceDate } from '../domain/componentTypes';
-import { openDatabase } from './client';
 import { notifyLocalWrite } from './localWrites';
 import { MIGRATIONS } from './schema';
 import { exportSnapshot, importSnapshot, type DatabaseSnapshot } from './repositories/sync';
@@ -17,6 +16,7 @@ const MAX_PROBLEMS = 8;
 const WORK_ORDER_STATUSES = ['open', 'in_progress', 'ready_for_pickup', 'completed', 'cancelled'];
 const ITEM_TYPES = ['labor', 'part'];
 const MENU_CATEGORIES = ['labor', 'package', 'part'];
+const SYNCED_ENTITY_TYPES = ['customer', 'bike', 'work_order', 'bike_component', 'service_menu_item'];
 
 type Row = Record<string, unknown>;
 const isRow = (value: unknown): value is Row => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -73,11 +73,21 @@ export function validateSnapshot(input: unknown): DatabaseSnapshot {
 		const key = str(row, keys);
 		return key ? `is missing "${key}".` : null;
 	};
+	// A restore uploads these rows, and other devices reject a packet with a wrongly typed field on every retry.
+	const notText = (row: Row, keys: string[]) => {
+		const key = keys.find((name) => row[name] != null && typeof row[name] !== 'string');
+		return key ? `has an invalid "${key}".` : null;
+	};
 
-	check('customers', (r) => missing(r, ['name', 'created_at']));
-	check('bikes', (r) => missing(r, ['customer_id', 'brand', 'model', 'created_at']));
+	check('customers', (r) => missing(r, ['name', 'created_at']) ?? notText(r, ['phone', 'email', 'notes', 'updated_at']));
+	check('bikes', (r) =>
+		missing(r, ['customer_id', 'brand', 'model', 'created_at']) ??
+		notText(r, ['color', 'serial_number', 'notes', 'updated_at']) ??
+		(r.year != null && !Number.isSafeInteger(r.year) ? 'has an invalid year.' : null)
+	);
 	check('work_orders', (r) =>
 		missing(r, ['bike_id', 'issue_summary', 'created_at', 'updated_at']) ??
+		notText(r, ['notes']) ??
 		(!WORK_ORDER_STATUSES.includes(r.status as string) ? 'has an invalid status.' : null) ??
 		(!isNonNegativeInt(r.total_cents) ? 'total_cents must be whole cents.' : null)
 	);
@@ -90,6 +100,7 @@ export function validateSnapshot(input: unknown): DatabaseSnapshot {
 	);
 	check('bike_components', (r) =>
 		missing(r, ['bike_id', 'created_at', 'updated_at']) ??
+		notText(r, ['work_order_id', 'notes']) ??
 		(!isComponentType(r.component_type) ? 'has an unknown component_type.' : null) ??
 		(typeof r.last_serviced_date !== 'string' || !isServiceDate(r.last_serviced_date)
 			? 'last_serviced_date must be YYYY-MM-DD.'
@@ -97,11 +108,19 @@ export function validateSnapshot(input: unknown): DatabaseSnapshot {
 	);
 	check('service_menu_items', (r) =>
 		missing(r, ['name', 'created_at', 'updated_at']) ??
+		notText(r, ['archived_at']) ??
 		(!MENU_CATEGORIES.includes(r.category as string) ? 'has an invalid category.' : null) ??
 		(!ITEM_TYPES.includes(r.item_type as string) ? 'has an invalid item_type.' : null) ??
 		(!isNonNegativeInt(r.default_price_cents) ? 'default_price_cents must be whole cents.' : null) ??
 		(r.component_tag != null && !isComponentType(r.component_tag) ? 'has an unknown component_tag.' : null)
 	);
+
+	// A restore re-queues the deletes listed here, so they must be something other devices can apply.
+	for (const entry of tables.outbox ?? []) {
+		if (entry.action === 'DELETE' && (!SYNCED_ENTITY_TYPES.includes(entry.entity_type as string) || typeof entry.entity_id !== 'string' || !entry.entity_id)) {
+			fail(`outbox row ${String(entry.id)} is not a valid delete.`);
+		}
+	}
 
 	// Parent references, so the restore can never trip a foreign key halfway through.
 	const references: Array<[string, string, string]> = [
@@ -143,25 +162,31 @@ export async function restoreBackup(json: string, selfPeerId: string, selfPeerNa
 	notifyLocalWrite();
 }
 
-// Wipe this device's shop data. The service menu is kept (it is the shop price list, not customer data), and so are the sync outbox and peer cursors, so nothing already queued is lost
-// and a later pull does not re-download history the device has already seen.
-export async function clearLocalDatabase(): Promise<void> {
+// Wipe this device's shop data. The service menu is kept (it is the shop price list, not customer data), and so is the
+// sync outbox, so nothing already queued is lost. Pull cursors restart from zero, including this device's own, so the
+// next sync rebuilds everything from Dropbox instead of leaving a partial database.
+export async function clearLocalDatabase(selfPeerId: string, selfPeerName: string): Promise<void> {
 	await inTransaction(async (connection) => {
 		// Children first; cascades would also work but this keeps the order obvious.
 		for (const table of ['bike_components', 'work_order_items', 'work_orders', 'bikes', 'customers']) {
 			await connection.exec(`DELETE FROM ${table}`);
 		}
+		await connection.exec(`DELETE FROM peer_sync_state WHERE peer_id LIKE 'pull:%'`);
+		await connection.exec('INSERT INTO peer_sync_state (peer_id, peer_name, last_synced_seq) VALUES (?, ?, 0)', {
+			bind: [selfPeerId, selfPeerName]
+		});
 	});
 	notifyLocalWrite();
 }
 
 // Changes not yet uploaded to a relay (Dropbox). Before any relay has synced, every outbox entry is pending.
 export async function countPendingOutbox(): Promise<number> {
-	const connection = await openDatabase();
-	const rows = (await connection.exec(
-		`SELECT COUNT(*) AS pending FROM sync_outbox
-		 WHERE seq > COALESCE((SELECT MAX(last_synced_seq) FROM peer_sync_state WHERE peer_id LIKE 'relay:%'), 0)`,
-		{ rowMode: 'object', returnValue: 'resultRows' }
+	const rows = (await inTransaction((connection) =>
+		connection.exec(
+			`SELECT COUNT(*) AS pending FROM sync_outbox
+			 WHERE seq > COALESCE((SELECT MAX(last_synced_seq) FROM peer_sync_state WHERE peer_id LIKE 'relay:%'), 0)`,
+			{ rowMode: 'object', returnValue: 'resultRows' }
+		)
 	)) as Array<{ pending: number }>;
 	return rows[0]?.pending ?? 0;
 }

@@ -119,7 +119,7 @@ export interface DatabaseSnapshot {
     bike_components?: BikeComponentSnapshotRow[];
     // Absent in snapshots exported before schema v6; an absent list leaves the local menu untouched.
     service_menu_items?: ServiceMenuItemSnapshotRow[];
-    // Informational copy of the sync outbox at export time; restore does not replay it.
+    // The sync outbox at export time. A restore re-queues its deletes; other rows are covered by the restored data.
     outbox?: OutboxEntry[];
   };
 }
@@ -454,14 +454,14 @@ export async function importSnapshot(
       bind: [`${PULL_PEER_PREFIX}%`],
     });
 
-    const tipRows = (await connection.exec(
-      "SELECT COALESCE(MAX(seq), 0) AS tip FROM sync_outbox",
-      {
-        rowMode: "object",
-        returnValue: "resultRows",
-      },
-    )) as Array<{ tip: number }>;
-    const tip = tipRows[0]?.tip ?? 0;
+    // A device normally never reads its own packets. This cursor makes the next sync replay what this device
+    // did after the backup (see pullPhase); it is read before queueRestoredState adds newer outbox rows.
+    // shortcut: work after the backup is only found while its outbox row exists (about 30 days), store seq in backups if older restores matter.
+    const replayFrom = await selectOne<{ seq: number }>(
+      `SELECT COALESCE(MIN(seq) - 1, (SELECT COALESCE(MAX(seq), 0) FROM sync_outbox)) AS seq
+			 FROM sync_outbox WHERE created_at > ?`,
+      [snapshot.exported_at ?? null],
+    );
 
     await connection.exec(
       `INSERT INTO peer_sync_state (peer_id, peer_name, last_synced_seq, last_seen_at)
@@ -470,9 +470,106 @@ export async function importSnapshot(
 			   peer_name = excluded.peer_name,
 			   last_synced_seq = excluded.last_synced_seq,
 			   last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-      { bind: [selfPeerId, selfPeerName, tip] },
+      { bind: [selfPeerId, selfPeerName, replayFrom?.seq ?? 0] },
     );
+
+    await queueRestoredState(connection, snapshot);
   });
+}
+
+const ENTITY_TABLES: Record<string, string> = {
+  customer: "customers",
+  bike: "bikes",
+  work_order: "work_orders",
+  bike_component: "bike_components",
+  service_menu_item: "service_menu_items",
+};
+
+// Restored rows bypass the repositories, so queue them here or they would never reach other devices (a replacement
+// tablet, a new Dropbox folder). They keep their original updated_at, so last-write-wins protects newer edits elsewhere.
+async function queueRestoredState(
+  connection: SqliteConnection,
+  snapshot: DatabaseSnapshot,
+): Promise<void> {
+  const { data } = snapshot;
+
+  // Deletes the backup knew about, which may never have been uploaded.
+  const known = new Set(
+    (
+      await selectRows<{ entity_id: string }>(
+        "SELECT entity_id FROM sync_outbox WHERE action = 'DELETE'",
+      )
+    ).map((row) => row.entity_id),
+  );
+  for (const entry of data.outbox ?? []) {
+    if (entry.action !== "DELETE" || known.has(entry.entity_id)) continue;
+    await appendMutation({
+      entity_type: entry.entity_type,
+      entity_id: entry.entity_id,
+      action: "DELETE",
+      payload: { id: entry.entity_id },
+    });
+  }
+
+  // A restored record is no longer deleted: without this, deletedOnThisDevice would ignore later edits to it.
+  for (const [entityType, table] of Object.entries(ENTITY_TABLES)) {
+    await connection.exec(
+      `DELETE FROM sync_outbox WHERE action = 'DELETE' AND entity_type = ? AND entity_id IN (SELECT id FROM ${table})`,
+      { bind: [entityType] },
+    );
+  }
+
+  const queue = (
+    entityType: string,
+    row: { id: string; [key: string]: unknown },
+  ) =>
+    appendMutation({
+      entity_type: entityType,
+      entity_id: row.id,
+      action: "UPDATE",
+      payload: row,
+    });
+
+  const items = new Map<string, unknown[]>();
+  for (const item of data.work_order_items) {
+    items.set(item.work_order_id, [
+      ...(items.get(item.work_order_id) ?? []),
+      {
+        id: item.id,
+        item_type: item.item_type,
+        description: item.description,
+        quantity: item.quantity,
+        unit_price_cents: item.unit_price_cents,
+        component_type: item.component_type ?? null,
+      },
+    ]);
+  }
+
+  // Parents first, so a device applying these in order always has the parent row.
+  for (const customer of data.customers) {
+    await queue("customer", {
+      ...customer,
+      updated_at: customer.updated_at ?? customer.created_at,
+    });
+  }
+  for (const bike of data.bikes) {
+    await queue("bike", {
+      ...bike,
+      updated_at: bike.updated_at ?? bike.created_at,
+    });
+  }
+  for (const workOrder of data.work_orders) {
+    await queue("work_order", {
+      ...workOrder,
+      items: items.get(workOrder.id) ?? [],
+    });
+  }
+  for (const component of data.bike_components ?? []) {
+    await queue("bike_component", { ...component });
+  }
+  for (const item of data.service_menu_items ?? []) {
+    await queue("service_menu_item", { ...item });
+  }
 }
 
 export async function getPeerState(
@@ -482,6 +579,14 @@ export async function getPeerState(
     "SELECT * FROM peer_sync_state WHERE peer_id = ?",
     [peerId],
   );
+}
+
+export function deletePeerState(peerId: string): Promise<void> {
+  return inTransaction(async (connection) => {
+    await connection.exec("DELETE FROM peer_sync_state WHERE peer_id = ?", {
+      bind: [peerId],
+    });
+  });
 }
 
 export interface ApplyRemoteResult {
@@ -939,6 +1044,7 @@ export interface SyncRepository {
   getSyncDelta: typeof getSyncDelta;
   acknowledgeSync: typeof acknowledgeSync;
   getPeerState: typeof getPeerState;
+  deletePeerState: typeof deletePeerState;
   applyRemoteDeltas: typeof applyRemoteDeltas;
   pruneStaleOutboxLogs: typeof pruneStaleOutboxLogs;
 }
@@ -947,6 +1053,7 @@ export const syncRepository: SyncRepository = {
   getSyncDelta,
   acknowledgeSync,
   getPeerState,
+  deletePeerState,
   applyRemoteDeltas,
   pruneStaleOutboxLogs,
 };

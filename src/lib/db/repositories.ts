@@ -51,13 +51,15 @@ export type UpdateCustomerInput = Omit<CreateCustomerInput, 'id'>;
 export type UpdateBikeInput = Omit<CreateBikeInput, 'id' | 'customer_id'>;
 
 export async function getCustomers(): Promise<Customer[]> {
-	return selectRows<Customer>(
-		`SELECT * FROM customers ORDER BY created_at DESC, name ASC`
-	);
+	// Reads for the screens wait in the transaction queue so they never show a half-finished write.
+	return inTransaction(() => selectRows<Customer>(`SELECT * FROM customers ORDER BY created_at DESC, name ASC`));
 }
 
+// Do not call from inside inTransaction.
 export async function getCustomer(customerId: string): Promise<Customer | null> {
-	const [customer] = await selectRows<Customer>('SELECT * FROM customers WHERE id = ?', [customerId]);
+	const [customer] = await inTransaction(() =>
+		selectRows<Customer>('SELECT * FROM customers WHERE id = ?', [customerId])
+	);
 	return customer ?? null;
 }
 
@@ -143,14 +145,16 @@ export async function createCustomer(input: CreateCustomerInput): Promise<Custom
 }
 
 export async function getBikesForCustomer(customerId: string): Promise<Bike[]> {
-	return selectRows<Bike>(
-		`SELECT * FROM bikes WHERE customer_id = ? ORDER BY created_at DESC, brand ASC, model ASC`,
-		[customerId]
+	return inTransaction(() =>
+		selectRows<Bike>(`SELECT * FROM bikes WHERE customer_id = ? ORDER BY created_at DESC, brand ASC, model ASC`, [
+			customerId
+		])
 	);
 }
 
+// Do not call from inside inTransaction.
 export async function getBike(bikeId: string): Promise<Bike | null> {
-	const [bike] = await selectRows<Bike>('SELECT * FROM bikes WHERE id = ?', [bikeId]);
+	const [bike] = await inTransaction(() => selectRows<Bike>('SELECT * FROM bikes WHERE id = ?', [bikeId]));
 	return bike ?? null;
 }
 

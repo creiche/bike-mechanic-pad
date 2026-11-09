@@ -36,9 +36,11 @@ export interface ServiceMenuItemInput {
 }
 
 export async function listServiceMenuItems(includeArchived = false): Promise<ServiceMenuItem[]> {
-	return selectRows<ServiceMenuItem>(
-		`SELECT * FROM service_menu_items ${includeArchived ? '' : 'WHERE archived_at IS NULL'}
-		 ORDER BY category ASC, name COLLATE NOCASE ASC`
+	return inTransaction(() =>
+		selectRows<ServiceMenuItem>(
+			`SELECT * FROM service_menu_items ${includeArchived ? '' : 'WHERE archived_at IS NULL'}
+			 ORDER BY category ASC, name COLLATE NOCASE ASC`
+		)
 	);
 }
 

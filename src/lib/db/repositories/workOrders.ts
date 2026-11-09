@@ -249,15 +249,17 @@ export async function listWorkOrders(statuses?: readonly WorkOrderStatus[]): Pro
 	const filter = statuses && statuses.length > 0 ? statuses : null;
 	filter?.forEach(assertWorkOrderStatus);
 
-	return selectRows<WorkOrderSummary>(
-		`SELECT wo.*, c.id AS customer_id, c.name AS customer_name, b.brand AS bike_brand, b.model AS bike_model,
-		        (SELECT COUNT(*) FROM work_order_items i WHERE i.work_order_id = wo.id) AS item_count
-		 FROM work_orders wo
-		 JOIN bikes b ON b.id = wo.bike_id
-		 JOIN customers c ON c.id = b.customer_id
-		 ${filter ? `WHERE wo.status IN (${filter.map(() => '?').join(', ')})` : ''}
-		 ORDER BY wo.updated_at DESC, wo.created_at DESC`,
-		filter ? [...filter] : []
+	return inTransaction(() =>
+		selectRows<WorkOrderSummary>(
+			`SELECT wo.*, c.id AS customer_id, c.name AS customer_name, b.brand AS bike_brand, b.model AS bike_model,
+			        (SELECT COUNT(*) FROM work_order_items i WHERE i.work_order_id = wo.id) AS item_count
+			 FROM work_orders wo
+			 JOIN bikes b ON b.id = wo.bike_id
+			 JOIN customers c ON c.id = b.customer_id
+			 ${filter ? `WHERE wo.status IN (${filter.map(() => '?').join(', ')})` : ''}
+			 ORDER BY wo.updated_at DESC, wo.created_at DESC`,
+			filter ? [...filter] : []
+		)
 	);
 }
 
@@ -266,8 +268,10 @@ export async function countWorkOrdersByStatus(): Promise<Record<WorkOrderStatus,
 		WorkOrderStatus,
 		number
 	>;
-	const rows = await selectRows<{ status: WorkOrderStatus; total: number }>(
-		'SELECT status, COUNT(*) AS total FROM work_orders GROUP BY status'
+	const rows = await inTransaction(() =>
+		selectRows<{ status: WorkOrderStatus; total: number }>(
+			'SELECT status, COUNT(*) AS total FROM work_orders GROUP BY status'
+		)
 	);
 	for (const row of rows) counts[row.status] = row.total;
 	return counts;

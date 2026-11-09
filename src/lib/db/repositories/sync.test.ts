@@ -135,13 +135,13 @@ describe('sync repository', () => {
 		expect(snapshot.data.work_order_items).toHaveLength(1);
 	});
 
-	it('importSnapshot replaces local data and updates self cursor to outbox tip', async () => {
+	it('importSnapshot replaces local data and points the self cursor before work done after the backup', async () => {
 		await appendMutation({ entity_type: 'work_order', entity_id: 'wo-1', action: 'INSERT', payload: { n: 1 } });
 		await appendMutation({ entity_type: 'work_order', entity_id: 'wo-2', action: 'INSERT', payload: { n: 2 } });
 
 		const snapshot: DatabaseSnapshot = {
 			version: 4,
-			exported_at: '2026-11-07T00:00:00.000Z',
+			exported_at: '2000-01-01T00:00:00.000Z',
 			data: {
 				customers: [
 					{
@@ -199,17 +199,17 @@ describe('sync repository', () => {
 		expect(queryRows('SELECT id FROM work_orders ORDER BY id')).toEqual([{ id: 'wo-snap' }]);
 		expect(queryRows('SELECT id FROM work_order_items ORDER BY id')).toEqual([{ id: 'woi-snap' }]);
 		expect(queryRows('SELECT peer_name, last_synced_seq FROM peer_sync_state WHERE peer_id = ?', ['self-device']))
-			.toEqual([{ peer_name: 'My Device', last_synced_seq: 2 }]);
+			.toEqual([{ peer_name: 'My Device', last_synced_seq: 0 }]);
 	});
 
-	it('importSnapshot resets self cursor down to current tip when previous cursor is higher', async () => {
+	it('importSnapshot resets self cursor down to the outbox tip when nothing happened after the backup', async () => {
 		await appendMutation({ entity_type: 'work_order', entity_id: 'wo-1', action: 'INSERT', payload: { n: 1 } });
 		await appendMutation({ entity_type: 'work_order', entity_id: 'wo-2', action: 'INSERT', payload: { n: 2 } });
 		await acknowledgeSync('self-device', 'Before Import', 100);
 
 		const snapshot: DatabaseSnapshot = {
 			version: 4,
-			exported_at: '2026-11-07T00:00:00.000Z',
+			exported_at: '2999-01-01T00:00:00.000Z',
 			data: {
 				customers: [
 					{
@@ -422,6 +422,76 @@ describe('applyRemoteDeltas', () => {
 
 		expect(replay).toMatchObject({ blocked: false, lastSyncedSeq: 1 });
 		expect(queryRows('SELECT id FROM customers')).toEqual([]);
+	});
+
+	it('accepts later peer edits to a record a restore brought back', async () => {
+		const peer = pullPeerId('dev-b');
+		await applyRemoteDeltas(peer, 'B', [remote(1, 'customer', 'INSERT', 'c1', { id: 'c1', name: 'Ana' })]);
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		await deleteCustomer('c1');
+
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+		await applyRemoteDeltas(peer, 'B', [
+			remote(2, 'customer', 'UPDATE', 'c1', { id: 'c1', name: 'Ana B', updated_at: '2999-01-01T00:00:00.000Z' })
+		]);
+
+		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana B' }]);
+	});
+
+	it('keeps a restored record when replaying this device history that deleted it', async () => {
+		const customer = await createCustomer({ name: 'Ana' });
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		await deleteCustomer(customer.id);
+		const history = queryRows('SELECT * FROM sync_outbox ORDER BY seq') as unknown as OutboxEntry[];
+		const before = history[history.length - 1].seq;
+
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+		const requeued = queryRows('SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq', [before]) as unknown as OutboxEntry[];
+		await applyRemoteDeltas(pullPeerId('dev-self-replay'), 'Self', [...history, ...requeued]);
+
+		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana' }]);
+	});
+
+	it('queues restored rows, parents first, so another device can rebuild from them', async () => {
+		const customer = await createCustomer({ name: 'Ana' });
+		const bike = await createBike({ customer_id: customer.id, brand: 'Trek', model: 'Domane' });
+		const order = await createWorkOrder({
+			bike_id: bike.id,
+			issue_summary: 'Chain',
+			items: [{ item_type: 'part', description: 'Chain', quantity: 1, unit_price_cents: 3555 }]
+		});
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		const before = queryRows('SELECT MAX(seq) AS tip FROM sync_outbox')[0].tip as number;
+
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+
+		const queued = queryRows('SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq', [before]) as unknown as OutboxEntry[];
+		expect(queued.map((row) => row.entity_type).filter((type) => type !== 'service_menu_item')).toEqual([
+			'customer',
+			'bike',
+			'work_order'
+		]);
+
+		// Apply them on an empty "other device": the same rows must come out, with the original timestamps.
+		db = new sqlite3.oo1.DB(':memory:') as unknown as TestDb;
+		db.exec('PRAGMA foreign_keys = ON;');
+		migrate(db as unknown as Parameters<typeof migrate>[0]);
+		const result = await applyRemoteDeltas(pullPeerId('dev-a'), 'A', queued);
+
+		expect(result).toMatchObject({ blocked: false });
+		expect(queryRows('SELECT updated_at FROM customers')).toEqual([{ updated_at: customer.updated_at }]);
+		expect(queryRows('SELECT id, total_cents FROM work_orders')).toEqual([{ id: order.id, total_cents: 3555 }]);
+		expect(queryRows('SELECT unit_price_cents FROM work_order_items')).toEqual([{ unit_price_cents: 3555 }]);
+	});
+
+	it('requeues a delete from the backup that this device has no record of', async () => {
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		backup.data.outbox = [{ ...remote(9, 'customer', 'DELETE', 'gone', { id: 'gone' }) }];
+
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+
+		expect(queryRows(`SELECT entity_id FROM sync_outbox WHERE action = 'DELETE'`)).toEqual([{ entity_id: 'gone' }]);
 	});
 
 	it('applies DELETE events', async () => {

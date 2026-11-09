@@ -139,7 +139,7 @@
 		}
 
 		const year = bikeForm.year ? Number(bikeForm.year) : null;
-		if (year !== null && !Number.isInteger(year)) {
+		if (year !== null && !Number.isSafeInteger(year)) {
 			errorMessage = 'Bike year must be a whole number.';
 			return;
 		}
