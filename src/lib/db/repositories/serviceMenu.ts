@@ -1,6 +1,5 @@
-import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { isComponentType, type ComponentType } from '../../domain/componentTypes';
-import { openDatabase } from '../client';
+import { selectRows } from '../client';
 import { notifyLocalWrite } from '../localWrites';
 import { inTransaction } from '../transaction';
 import { appendMutation } from './sync';
@@ -36,12 +35,6 @@ export interface ServiceMenuItemInput {
 	component_tag?: ComponentType | null;
 }
 
-async function selectRows<T>(sql: string, bind: BindingSpec = []): Promise<T[]> {
-	const connection = await openDatabase();
-	const result = await connection.exec(sql, { bind, rowMode: 'object', returnValue: 'resultRows' });
-	return Array.isArray(result) ? (result as T[]) : [];
-}
-
 export async function listServiceMenuItems(includeArchived = false): Promise<ServiceMenuItem[]> {
 	return selectRows<ServiceMenuItem>(
 		`SELECT * FROM service_menu_items ${includeArchived ? '' : 'WHERE archived_at IS NULL'}
@@ -58,7 +51,8 @@ export function filterServiceMenu(items: readonly ServiceMenuItem[], query: stri
 	});
 }
 
-function validate(input: ServiceMenuItemInput): Required<Omit<ServiceMenuItemInput, 'id'>> {
+// Returns ONLY the editable fields (never id/archived_at/timestamps) so spreading it over a row cannot clobber them.
+function validate(input: ServiceMenuItemInput): Pick<ServiceMenuItem, 'name' | 'category' | 'item_type' | 'default_price_cents' | 'component_tag'> {
 	const name = input.name.trim();
 	if (!name) throw new Error('Service name is required.');
 	if (!SERVICE_MENU_CATEGORIES.includes(input.category)) throw new Error(`Invalid category: ${input.category}`);
@@ -68,7 +62,7 @@ function validate(input: ServiceMenuItemInput): Required<Omit<ServiceMenuItemInp
 	}
 	const tag = input.component_tag ?? null;
 	if (tag !== null && !isComponentType(tag)) throw new Error(`Unknown component type: ${tag}`);
-	return { ...input, name, component_tag: tag };
+	return { name, category: input.category, item_type: input.item_type, default_price_cents: input.default_price_cents, component_tag: tag };
 }
 
 async function loadItem(id: string): Promise<ServiceMenuItem> {

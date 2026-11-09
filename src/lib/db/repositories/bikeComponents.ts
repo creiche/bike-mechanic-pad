@@ -1,6 +1,5 @@
-import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { isComponentType, isServiceDate, type ComponentType } from '../../domain/componentTypes';
-import { openDatabase, type SqliteConnection } from '../client';
+import { openDatabase, selectRows, type SqliteConnection } from '../client';
 import { notifyLocalWrite } from '../localWrites';
 import { inTransaction } from '../transaction';
 import { appendMutation } from './sync';
@@ -23,12 +22,6 @@ export interface LogComponentServiceInput {
 	last_serviced_date: string;
 	work_order_id?: string | null;
 	notes?: string | null;
-}
-
-async function selectRows<T>(sql: string, bind: BindingSpec = []): Promise<T[]> {
-	const connection = await openDatabase();
-	const result = await connection.exec(sql, { bind, rowMode: 'object', returnValue: 'resultRows' });
-	return Array.isArray(result) ? (result as T[]) : [];
 }
 
 export function getBikeComponents(bikeId: string): Promise<BikeComponent[]> {

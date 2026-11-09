@@ -180,5 +180,17 @@ INSERT OR IGNORE INTO service_menu_items (id, category, name, default_price_cent
   ('svc-seed-tube-standard', 'part', 'Inner Tube', 900, 'part', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
   ('svc-seed-chain-11-speed', 'part', 'Chain (11-speed)', 3500, 'part', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z');
 `
+  },
+  {
+    version: 7,
+    name: 'customer + bike updated_at for last-write-wins sync',
+    sql: `
+-- SQLite cannot add a column with a non-constant default (datetime('now')), so use an epoch constant
+-- and backfill existing rows from created_at. New rows always set updated_at explicitly in code.
+ALTER TABLE customers ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';
+ALTER TABLE bikes ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';
+UPDATE customers SET updated_at = created_at;
+UPDATE bikes SET updated_at = created_at;
+`
   }
 ];

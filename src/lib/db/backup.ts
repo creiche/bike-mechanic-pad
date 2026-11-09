@@ -143,12 +143,12 @@ export async function restoreBackup(json: string, selfPeerId: string, selfPeerNa
 	notifyLocalWrite();
 }
 
-// Wipe this device's shop data. The sync outbox and peer cursors are kept so nothing already queued is lost
+// Wipe this device's shop data. The service menu is kept (it is the shop price list, not customer data), and so are the sync outbox and peer cursors, so nothing already queued is lost
 // and a later pull does not re-download history the device has already seen.
 export async function clearLocalDatabase(): Promise<void> {
 	await inTransaction(async (connection) => {
 		// Children first; cascades would also work but this keeps the order obvious.
-		for (const table of ['bike_components', 'work_order_items', 'work_orders', 'bikes', 'customers', 'service_menu_items']) {
+		for (const table of ['bike_components', 'work_order_items', 'work_orders', 'bikes', 'customers']) {
 			await connection.exec(`DELETE FROM ${table}`);
 		}
 	});

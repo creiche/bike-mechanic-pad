@@ -69,7 +69,7 @@ function fakeRepository(outbox: OutboxEntry[] = []) {
 		applyRemoteDeltas: vi.fn(async (peerId: string, _name: string, deltas: OutboxEntry[]) => {
 			const last = Math.max(...deltas.map((row) => row.seq));
 			cursors.set(peerId, last);
-			return { applied: deltas.length, skipped: 0, lastSyncedSeq: last };
+			return { applied: deltas.length, blocked: false, lastSyncedSeq: last };
 		}),
 		pruneStaleOutboxLogs: vi.fn(async () => 0)
 	} satisfies SyncRepository;

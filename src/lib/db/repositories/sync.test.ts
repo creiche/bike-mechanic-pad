@@ -12,6 +12,8 @@ vi.mock('../client', () => {
 		Promise.resolve(db.exec(sql, options));
 	return {
 		openDatabase: async () => ({ exec }),
+		selectRows: async (sql: string, bind: BindingSpec = []) =>
+			db.exec(sql, { bind, rowMode: 'object', returnValue: 'resultRows' }),
 		runQuery: (sql: string, bind: BindingSpec = []) => exec(sql, { bind })
 	};
 });
@@ -293,7 +295,7 @@ describe('applyRemoteDeltas', () => {
 	it('applies deltas, advances the pull cursor, and does not echo into the outbox', async () => {
 		const result = await applyRemoteDeltas(pullPeerId('dev-b'), 'Shop iPad', remoteChain());
 
-		expect(result).toEqual({ applied: 3, skipped: 0, lastSyncedSeq: 3 });
+		expect(result).toMatchObject({ applied: 3, blocked: false, lastSyncedSeq: 3 });
 		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana' }]);
 		expect(queryRows('SELECT brand FROM bikes')).toEqual([{ brand: 'Trek' }]);
 		expect(queryRows('SELECT total_cents FROM work_orders')).toEqual([{ total_cents: 5000 }]);
@@ -306,7 +308,7 @@ describe('applyRemoteDeltas', () => {
 		await applyRemoteDeltas(pullPeerId('dev-b'), 'Shop iPad', remoteChain());
 		const replay = await applyRemoteDeltas(pullPeerId('dev-b'), 'Shop iPad', remoteChain());
 
-		expect(replay).toEqual({ applied: 0, skipped: 0, lastSyncedSeq: 3 });
+		expect(replay).toMatchObject({ applied: 0, blocked: false, lastSyncedSeq: 3 });
 		expect(queryRows('SELECT id FROM work_order_items')).toHaveLength(1);
 	});
 
@@ -323,11 +325,52 @@ describe('applyRemoteDeltas', () => {
 		expect(queryRows('SELECT issue_summary FROM work_orders')).toEqual([{ issue_summary: 'newer' }]);
 	});
 
-	it('skips events whose parent was deleted and still advances the cursor', async () => {
-		const result = await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [remoteChain()[1]]);
+	it('keeps the newer customer when an older update arrives (last write wins)', async () => {
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [
+			remote(1, 'customer', 'UPDATE', 'c1', { id: 'c1', name: 'Ana', phone: '555-NEW', updated_at: '2026-11-07T12:00:00.000Z' })
+		]);
+		await applyRemoteDeltas(pullPeerId('dev-c'), 'C', [
+			remote(1, 'customer', 'UPDATE', 'c1', { id: 'c1', name: 'Ana', phone: '555-OLD', updated_at: '2026-11-07T11:00:00.000Z' })
+		]);
 
-		expect(result).toEqual({ applied: 0, skipped: 1, lastSyncedSeq: 2 });
+		expect(queryRows('SELECT phone FROM customers')).toEqual([{ phone: '555-NEW' }]);
+	});
+
+	it('keeps the newer bike when an older update arrives (last write wins)', async () => {
+		const bike = { id: 'b1', customer_id: 'c1', model: 'Domane' };
+		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [
+			remoteChain()[0],
+			remote(2, 'bike', 'UPDATE', 'b1', { ...bike, brand: 'Trek', updated_at: '2026-11-07T12:00:00.000Z' })
+		]);
+		await applyRemoteDeltas(pullPeerId('dev-c'), 'C', [
+			remote(1, 'bike', 'UPDATE', 'b1', { ...bike, brand: 'Old Brand', updated_at: '2026-11-07T11:00:00.000Z' })
+		]);
+
+		expect(queryRows('SELECT brand FROM bikes')).toEqual([{ brand: 'Trek' }]);
+	});
+
+	it('local customer and bike edits stamp updated_at and send it in the payload', async () => {
+		const customer = await createCustomer({ name: 'Ana' });
+		const bike = await createBike({ customer_id: customer.id, brand: 'Trek', model: 'Domane' });
+		const { updateCustomer } = await import('../repositories');
+		await updateCustomer(customer.id, { name: 'Ana B' });
+
+		const payloads = queryRows("SELECT payload FROM sync_outbox ORDER BY seq").map((r) => JSON.parse(r.payload as string));
+		expect(payloads.every((p) => typeof p.updated_at === 'string' && typeof p.created_at === 'string')).toBe(true);
+		expect(bike.updated_at).toBe(bike.created_at);
+		expect(payloads[2].updated_at >= payloads[0].updated_at).toBe(true);
+	});
+
+	it('stops at a delta whose parent is missing, keeps the cursor before it, and retries once the parent arrives', async () => {
+		const chain = remoteChain();
+		// The bike (seq 2) arrives before its customer (seq 1 was never delivered).
+		const first = await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [chain[1], chain[2]]);
+		expect(first).toMatchObject({ applied: 0, blocked: true, lastSyncedSeq: 0 });
 		expect(queryRows('SELECT id FROM bikes')).toEqual([]);
+
+		const retry = await applyRemoteDeltas(pullPeerId('dev-b'), 'B', chain);
+		expect(retry).toMatchObject({ applied: 3, blocked: false, lastSyncedSeq: 3 });
+		expect(queryRows('SELECT id FROM work_orders')).toEqual([{ id: 'w1' }]);
 	});
 
 	it('applies DELETE events', async () => {

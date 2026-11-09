@@ -101,3 +101,10 @@ export async function closeDatabase(): Promise<void> {
 	connectionPromise = null;
 	await connection.close();
 }
+
+// Run a SELECT and return rows as objects; shared by every repository.
+export async function selectRows<T>(sql: string, bind: BindingSpec = []): Promise<T[]> {
+	const connection = await openDatabase();
+	const result = await connection.exec(sql, { bind, rowMode: 'object', returnValue: 'resultRows' });
+	return Array.isArray(result) ? (result as T[]) : [];
+}

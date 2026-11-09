@@ -32,6 +32,8 @@ Sync is opt-in. To use it, configure a Dropbox app key and redirect URI in Dropb
 
 Sync is not a backup guarantee. It depends on your Dropbox account, configuration, network access, and the correct folder being used on each device. Confirm that your devices have synced successfully, and maintain an independent backup and a recovery procedure that you have tested.
 
+> **Security warning: GitHub Pages hosting.** Browser storage (localStorage and the OPFS database) belongs to an *origin*, not a URL path. Every project site under `yourname.github.io` shares one origin, so any other page hosted on the same GitHub account can read this app's local database and saved Dropbox tokens. For real shop data, serve the app from a custom domain or a dedicated host that runs only this app.
+
 ## Important: Self-Supported Software and Risk
 
 **Use this software at your own risk. You are responsible for protecting your data and for any consequences of using it in your business.** The maintainer does not accept responsibility for lost or corrupted customer, bicycle, work order, or service-history data; lost revenue; missed work; business interruption; or other business losses arising from the software, its use, its failure, or reliance on sync. To the fullest extent permitted by applicable law, the software is provided without warranties, and no support or recovery service is promised.

@@ -1,7 +1,6 @@
-import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { isComponentType, todayLocalDate, type ComponentType } from '../../domain/componentTypes';
 import { lineTotalCents, sumLineTotals } from '../../domain/money';
-import { openDatabase, type SqliteConnection } from '../client';
+import { openDatabase, selectRows, type SqliteConnection } from '../client';
 import { notifyLocalWrite } from '../localWrites';
 import { inTransaction } from '../transaction';
 import { upsertBikeComponent } from './bikeComponents';
@@ -93,17 +92,6 @@ function assertWorkOrderItemType(itemType: string): asserts itemType is WorkOrde
 	if (!WORK_ORDER_ITEM_TYPES.includes(itemType as WorkOrderItemType)) {
 		throw new Error(`Invalid work order item type: ${itemType}`);
 	}
-}
-
-async function selectRows<T>(sql: string, bind: BindingSpec = []): Promise<T[]> {
-	const connection = await openDatabase();
-	const result = await connection.exec(sql, {
-		bind,
-		rowMode: 'object',
-		returnValue: 'resultRows'
-	});
-
-	return Array.isArray(result) ? (result as T[]) : [];
 }
 
 interface PreparedItem {

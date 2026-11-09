@@ -11,6 +11,7 @@ export interface SyncCycleSummary {
 	pushedDeltas: number;
 	pulledPackets: number;
 	appliedDeltas: number;
+	// Packets held back because a parent row has not arrived yet; retried next cycle.
 	skippedDeltas: number;
 	prunedRows: number;
 }
@@ -262,7 +263,11 @@ export class SyncService {
 					const result = await this.repository.applyRemoteDeltas(peerId, packet.deviceName, packet.deltas);
 					pulledPackets++;
 					appliedDeltas += result.applied;
-					skippedDeltas += result.skipped;
+					if (result.blocked) {
+						// A parent row from another device has not arrived yet: retry this packet next cycle.
+						skippedDeltas++;
+						break;
+					}
 				} catch (error) {
 					if (error instanceof CloudError) throw error; // offline/auth/rate limit affect every device
 					failures.push(error);

@@ -11,6 +11,8 @@ vi.mock('../client', () => {
 		Promise.resolve(db.exec(sql, options));
 	return {
 		openDatabase: async () => ({ exec }),
+		selectRows: async (sql: string, bind: BindingSpec = []) =>
+			db.exec(sql, { bind, rowMode: 'object', returnValue: 'resultRows' }),
 		runQuery: (sql: string, bind: BindingSpec = []) => exec(sql, { bind })
 	};
 });

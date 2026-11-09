@@ -38,6 +38,8 @@ async function openDatabase(): Promise<void> {
 
 	db = new sqlite3.oo1.OpfsDb(DB_FILENAME) as unknown as WorkerDatabase;
 	db.exec({ sql: 'PRAGMA foreign_keys = ON;' });
+	// Several tabs share this OPFS file; wait up to 5 s for another tab's write lock instead of failing at once.
+	db.exec({ sql: 'PRAGMA busy_timeout = 5000;' });
 	migrate(db);
 }
 

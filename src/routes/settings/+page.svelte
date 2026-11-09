@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { replaceState } from '$app/navigation';
 	import { resolve } from '$app/paths';
+	import { dangerButton, inputClass, primaryButton, secondaryButton } from '../../lib/ui';
 	import { describeSync, formatLastSynced, toneClasses } from '../../lib/sync/display';
 	import { syncService } from '../../lib/sync/runtime';
 	import { DEFAULT_FOLDER_PATH } from '../../lib/sync/settings';
@@ -23,10 +24,6 @@
 	const syncing = $derived($syncService.status === 'syncing');
 	const summary = $derived($syncService.lastSummary);
 
-	const inputClass =
-		'w-full min-h-12 rounded-md border border-neutral-700 bg-neutral-950 px-3 text-base text-slate-100 placeholder:text-neutral-600 focus:border-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-500/40';
-	const buttonClass =
-		'min-h-12 rounded-md px-5 text-base font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500/60 disabled:cursor-not-allowed disabled:opacity-50';
 
 	onMount(async () => {
 		redirectUri = new URL(resolve('/settings'), location.origin).href;
@@ -132,7 +129,7 @@
 				</div>
 				<button
 					type="button"
-					class="{buttonClass} bg-amber-500 text-neutral-950 hover:bg-amber-400"
+					class={primaryButton}
 					onclick={handleSyncNow}
 					disabled={!connected || syncing}
 				>
@@ -211,13 +208,13 @@
 				{/if}
 
 				<div class="flex flex-wrap gap-3">
-					<button type="submit" class="{buttonClass} border border-neutral-600 bg-neutral-800 text-slate-100 hover:bg-neutral-700" disabled={busy}>
+					<button type="submit" class={secondaryButton} disabled={busy}>
 						Save
 					</button>
 					{#if connected}
 						<button
 							type="button"
-							class="{buttonClass} border border-rose-800 bg-rose-950/40 text-rose-300 hover:bg-rose-950"
+							class={dangerButton}
 							onclick={handleDisconnect}
 							disabled={busy}
 						>
@@ -226,7 +223,7 @@
 					{:else}
 						<button
 							type="button"
-							class="{buttonClass} bg-amber-500 text-neutral-950 hover:bg-amber-400"
+							class={primaryButton}
 							onclick={handleConnect}
 							disabled={busy}
 						>

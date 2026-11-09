@@ -1,5 +1,5 @@
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
-import { openDatabase } from './client';
+import { openDatabase, selectRows } from './client';
 import { notifyLocalWrite } from './localWrites';
 import { appendMutation } from './repositories/sync';
 import { inTransaction } from './transaction';
@@ -11,6 +11,8 @@ export interface Customer {
 	email: string | null;
 	notes: string | null;
 	created_at: string;
+	// Last-write-wins key for sync: the newest updated_at survives on every device.
+	updated_at: string;
 }
 
 export interface Bike {
@@ -23,6 +25,7 @@ export interface Bike {
 	serial_number: string | null;
 	notes: string | null;
 	created_at: string;
+	updated_at: string;
 }
 
 export interface CreateCustomerInput {
@@ -46,17 +49,6 @@ export interface CreateBikeInput {
 
 export type UpdateCustomerInput = Omit<CreateCustomerInput, 'id'>;
 export type UpdateBikeInput = Omit<CreateBikeInput, 'id' | 'customer_id'>;
-
-async function selectRows<T>(sql: string, bind: BindingSpec = []): Promise<T[]> {
-	const connection = await openDatabase();
-	const result = await connection.exec(sql, {
-		bind,
-		rowMode: 'object',
-		returnValue: 'resultRows'
-	});
-
-	return Array.isArray(result) ? (result as T[]) : [];
-}
 
 export async function getCustomers(): Promise<Customer[]> {
 	return selectRows<Customer>(
@@ -91,14 +83,15 @@ export async function updateCustomer(customerId: string, input: UpdateCustomerIn
 			throw new Error('Customer not found.');
 		}
 
-		await connection.exec(`UPDATE customers SET name = ?, phone = ?, email = ?, notes = ? WHERE id = ?`, {
-			bind: [fields.name, fields.phone, fields.email, fields.notes, customerId]
+		const updatedAt = new Date().toISOString();
+		await connection.exec(`UPDATE customers SET name = ?, phone = ?, email = ?, notes = ?, updated_at = ? WHERE id = ?`, {
+			bind: [fields.name, fields.phone, fields.email, fields.notes, updatedAt, customerId]
 		});
 		await appendMutation({
 			entity_type: 'customer',
 			entity_id: customerId,
 			action: 'UPDATE',
-			payload: { id: customerId, ...fields, created_at: existing.created_at }
+			payload: { id: customerId, ...fields, created_at: existing.created_at, updated_at: updatedAt }
 		});
 	});
 	notifyLocalWrite();
@@ -118,10 +111,12 @@ export async function createCustomer(input: CreateCustomerInput): Promise<Custom
 		throw new Error('Customer name is required.');
 	}
 
+	const now = new Date().toISOString();
 	await inTransaction(async (connection) => {
-		await connection.exec(`INSERT INTO customers (id, name, phone, email, notes) VALUES (?, ?, ?, ?, ?)`, {
-			bind: [customerId, name, input.phone ?? null, input.email ?? null, input.notes ?? null]
-		});
+		await connection.exec(
+			`INSERT INTO customers (id, name, phone, email, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			{ bind: [customerId, name, input.phone ?? null, input.email ?? null, input.notes ?? null, now, now] }
+		);
 		await appendMutation({
 			entity_type: 'customer',
 			entity_id: customerId,
@@ -131,7 +126,9 @@ export async function createCustomer(input: CreateCustomerInput): Promise<Custom
 				name,
 				phone: input.phone ?? null,
 				email: input.email ?? null,
-				notes: input.notes ?? null
+				notes: input.notes ?? null,
+				created_at: now,
+				updated_at: now
 			}
 		});
 	});
@@ -182,15 +179,16 @@ export async function updateBike(bikeId: string, input: UpdateBikeInput): Promis
 			notes: input.notes ?? null
 		};
 
+		const updatedAt = new Date().toISOString();
 		await connection.exec(
-			`UPDATE bikes SET brand = ?, model = ?, year = ?, color = ?, serial_number = ?, notes = ? WHERE id = ?`,
-			{ bind: [...Object.values(fields), bikeId] }
+			`UPDATE bikes SET brand = ?, model = ?, year = ?, color = ?, serial_number = ?, notes = ?, updated_at = ? WHERE id = ?`,
+			{ bind: [...Object.values(fields), updatedAt, bikeId] }
 		);
 		await appendMutation({
 			entity_type: 'bike',
 			entity_id: bikeId,
 			action: 'UPDATE',
-			payload: { id: bikeId, customer_id: row.customer_id, ...fields, created_at: row.created_at }
+			payload: { id: bikeId, customer_id: row.customer_id, ...fields, created_at: row.created_at, updated_at: updatedAt }
 		});
 	});
 	notifyLocalWrite();
@@ -225,6 +223,7 @@ export async function createBike(input: CreateBikeInput): Promise<Bike> {
 		throw new Error('Bike brand and model are required.');
 	}
 
+	const now = new Date().toISOString();
 	const bikeFields = {
 		id: bikeId,
 		customer_id: input.customer_id,
@@ -233,13 +232,15 @@ export async function createBike(input: CreateBikeInput): Promise<Bike> {
 		year: input.year ?? null,
 		color: input.color ?? null,
 		serial_number: input.serial_number ?? null,
-		notes: input.notes ?? null
+		notes: input.notes ?? null,
+		created_at: now,
+		updated_at: now
 	};
 
 	await inTransaction(async (connection) => {
 		await connection.exec(
-			`INSERT INTO bikes (id, customer_id, brand, model, year, color, serial_number, notes)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO bikes (id, customer_id, brand, model, year, color, serial_number, notes, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			{ bind: Object.values(bikeFields) }
 		);
 		await appendMutation({ entity_type: 'bike', entity_id: bikeId, action: 'INSERT', payload: bikeFields });

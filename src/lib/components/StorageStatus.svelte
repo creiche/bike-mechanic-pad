@@ -39,10 +39,10 @@
 </script>
 
 <div class="hidden items-center gap-3 text-xs font-medium text-neutral-300 md:flex" role="status" data-testid="storage-status">
-	<span title={persisted === false ? 'The browser may clear local data under disk pressure.' : 'Data is stored on this device.'}>
-		<span class="text-emerald-400">&#9679;</span> Local OPFS Active{persisted ? ' (persistent)' : persisted === false ? ' (not persistent)' : ''}
-	</span>
 	{#if pending !== null}
+		<span title={persisted === false ? 'The browser may clear local data under disk pressure.' : 'Data is stored on this device.'}>
+		<span class="text-emerald-400">&#9679;</span> Local OPFS Active{persisted ? ' (persistent)' : persisted === false ? ' (not persistent)' : ''}
+		</span>
 		<span>{pending} pending {pending === 1 ? 'change' : 'changes'}</span>
 	{/if}
 	<span class={online ? 'text-neutral-300' : 'text-amber-300'}>{online ? 'Online' : 'Offline'}</span>
