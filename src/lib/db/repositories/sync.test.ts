@@ -202,7 +202,7 @@ describe('sync repository', () => {
 			.toEqual([{ peer_name: 'My Device', last_synced_seq: 0 }]);
 	});
 
-	it('importSnapshot resets self cursor down to the outbox tip when nothing happened after the backup', async () => {
+	it('importSnapshot resets self cursor to the start of history even when the backup is newer than every outbox row', async () => {
 		await appendMutation({ entity_type: 'work_order', entity_id: 'wo-1', action: 'INSERT', payload: { n: 1 } });
 		await appendMutation({ entity_type: 'work_order', entity_id: 'wo-2', action: 'INSERT', payload: { n: 2 } });
 		await acknowledgeSync('self-device', 'Before Import', 100);
@@ -263,7 +263,7 @@ describe('sync repository', () => {
 		await importSnapshot(snapshot, 'self-device', 'My Device');
 
 		expect(queryRows('SELECT peer_name, last_synced_seq FROM peer_sync_state WHERE peer_id = ?', ['self-device']))
-			.toEqual([{ peer_name: 'My Device', last_synced_seq: 2 }]);
+			.toEqual([{ peer_name: 'My Device', last_synced_seq: 0 }]);
 	});
 });
 
@@ -450,6 +450,23 @@ describe('applyRemoteDeltas', () => {
 		await applyRemoteDeltas(pullPeerId('dev-self-replay'), 'Self', [...history, ...requeued]);
 
 		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana' }]);
+	});
+
+	it('replays this device work whose outbox row was pruned before the restore', async () => {
+		await createCustomer({ name: 'Ana' });
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		await createCustomer({ name: 'Bo' });
+		const [{ seq: prunedThrough }] = queryRows('SELECT MAX(seq) AS seq FROM sync_outbox');
+		await createCustomer({ name: 'Cy' });
+		const history = queryRows('SELECT * FROM sync_outbox ORDER BY seq') as unknown as OutboxEntry[];
+		db.exec('DELETE FROM sync_outbox WHERE seq <= ?', { bind: [prunedThrough] });
+
+		const self = pullPeerId('dev-self');
+		await importSnapshot(backup, self, 'Self');
+		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana' }]);
+
+		await applyRemoteDeltas(self, 'Self', history);
+		expect(queryRows('SELECT name FROM customers ORDER BY name')).toEqual([{ name: 'Ana' }, { name: 'Bo' }, { name: 'Cy' }]);
 	});
 
 	const restoredCopy = (createdAt: string) => ({

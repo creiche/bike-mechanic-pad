@@ -106,9 +106,9 @@
 		}
 	}
 
+	// Leaves the Details form alone: status and line-item actions must not discard notes still being typed.
 	function applyOrder(next: WorkOrder) {
 		order = next;
-		details = { issue_summary: next.issue_summary, notes: next.notes ?? '' };
 	}
 
 	// One write at a time: the database connection is shared, so overlapping transactions would collide.
@@ -149,12 +149,12 @@
 		if (!order) return;
 		const current = order;
 		void run(async () => {
-			applyOrder(
-				await updateWorkOrder(current.id, {
-					issue_summary: details.issue_summary,
-					notes: details.notes.trim() || null
-				})
-			);
+			const next = await updateWorkOrder(current.id, {
+				issue_summary: details.issue_summary,
+				notes: details.notes.trim() || null
+			});
+			applyOrder(next);
+			details = { issue_summary: next.issue_summary, notes: next.notes ?? '' };
 		});
 	}
 

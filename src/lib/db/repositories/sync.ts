@@ -454,15 +454,10 @@ export async function importSnapshot(
       bind: [`${PULL_PEER_PREFIX}%`],
     });
 
-    // A device normally never reads its own packets. This cursor makes the next sync replay what this device
-    // did after the backup (see pullPhase); it is read before queueRestoredState adds newer outbox rows.
-    // shortcut: work after the backup is only found while its outbox row exists (about 30 days), store seq in backups if older restores matter.
-    const replayFrom = await selectOne<{ seq: number }>(
-      `SELECT COALESCE(MIN(seq) - 1, (SELECT COALESCE(MAX(seq), 0) FROM sync_outbox)) AS seq
-			 FROM sync_outbox WHERE created_at > ?`,
-      [snapshot.exported_at ?? null],
-    );
-
+    // A device normally never reads its own packets. A cursor of 0 makes the next sync replay its whole history
+    // (see pullPhase), like clearLocalDatabase. The outbox cannot pick a later start: old rows are pruned after about
+    // 30 days, and another device's backup says nothing about this device's stream. Last-write-wins rejects anything
+    // older than the restored rows.
     await connection.exec(
       `INSERT INTO peer_sync_state (peer_id, peer_name, last_synced_seq, last_seen_at)
 			 VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -470,7 +465,7 @@ export async function importSnapshot(
 			   peer_name = excluded.peer_name,
 			   last_synced_seq = excluded.last_synced_seq,
 			   last_seen_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
-      { bind: [selfPeerId, selfPeerName, replayFrom?.seq ?? 0] },
+      { bind: [selfPeerId, selfPeerName, 0] },
     );
 
     await queueRestoredState(connection, snapshot);
