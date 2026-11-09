@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { OutboxEntry, SyncRepository } from '../db/repositories/sync';
+import type { ApplyRemoteOptions, ApplyRemoteResult, OutboxEntry, SyncRepository } from '../db/repositories/sync';
 import { CloudError, type CloudStorageAdapter, type RemoteFile } from './cloud/types';
 import { buildPacket, packetFileName, parsePacket } from './packet';
 import { computeBackoffMs, SyncService } from './syncService';
@@ -66,10 +66,10 @@ function fakeRepository(outbox: OutboxEntry[] = []) {
 				? { peer_id: peerId, peer_name: '', last_synced_seq: cursors.get(peerId)!, last_seen_at: '' }
 				: null
 		),
-		applyRemoteDeltas: vi.fn(async (peerId: string, _name: string, deltas: OutboxEntry[]) => {
+		applyRemoteDeltas: vi.fn(async (peerId: string, _name: string, deltas: OutboxEntry[], _options?: ApplyRemoteOptions): Promise<ApplyRemoteResult> => {
 			const last = Math.max(...deltas.map((row) => row.seq));
 			cursors.set(peerId, last);
-			return { applied: deltas.length, blocked: false, lastSyncedSeq: last };
+			return { applied: deltas.length, blocked: false, blockedAt: null, dropped: 0, lastSyncedSeq: last };
 		}),
 		pruneStaleOutboxLogs: vi.fn(async () => 0)
 	} satisfies SyncRepository;
@@ -106,7 +106,7 @@ describe('SyncService push phase', () => {
 		expect(state.lastSummary).toMatchObject({ pushedPackets: 1, pushedDeltas: 3 });
 		const packet = JSON.parse(adapter.files.get(packetFileName({ ...self, startSeq: 1, endSeq: 3 }))!);
 		expect(packet).toMatchObject({ deviceId: 'dev-self', deviceName: 'Stand iPad', startSeq: 1, endSeq: 3 });
-		expect(repository.acknowledgeSync).toHaveBeenCalledWith('relay:fake', 'Fake Cloud', 3);
+		expect(repository.acknowledgeSync).toHaveBeenCalledWith('relay:fake:/sync', 'Fake Cloud', 3);
 	});
 
 	it('splits large backlogs into several packets', async () => {
@@ -128,7 +128,26 @@ describe('SyncService push phase', () => {
 
 		adapter.failWith = null;
 		expect((await service.syncNow()).status).toBe('idle');
-		expect(repository.acknowledgeSync).toHaveBeenCalledWith('relay:fake', 'Fake Cloud', 1);
+		expect(repository.acknowledgeSync).toHaveBeenCalledWith('relay:fake:/sync', 'Fake Cloud', 1);
+	});
+
+	it('uploads everything again to a new folder', async () => {
+		const { repository, service } = setup([delta(1)]);
+		await service.syncNow();
+
+		const moved = new FakeAdapter();
+		await new SyncService({ adapter: moved, identity: self, repository, folderPath: '/elsewhere' }).syncNow();
+
+		expect(moved.uploads).toHaveLength(1);
+	});
+
+	it('accepts an existing packet that differs only by device name', async () => {
+		const { adapter, repository, service } = setup([delta(1)]);
+		const packet = buildPacket({ ...self, deviceName: 'Old name' }, [delta(1)]);
+		adapter.files.set(packetFileName(packet), JSON.stringify(packet));
+
+		expect((await service.syncNow()).status).toBe('idle');
+		expect(repository.acknowledgeSync).toHaveBeenCalledTimes(1);
 	});
 
 	it('treats an identical existing packet as already uploaded', async () => {
@@ -199,6 +218,58 @@ describe('SyncService pull phase', () => {
 		await service.syncNow();
 
 		expect(repository.applyRemoteDeltas).not.toHaveBeenCalled();
+	});
+});
+
+describe('SyncService stalled devices', () => {
+	const other = { deviceId: 'dev-other', deviceName: 'Phone' };
+	const blocked = (blockedAt: string) => ({ applied: 0, blocked: true, blockedAt, dropped: 0, lastSyncedSeq: 0 });
+	const moved = { applied: 1, blocked: false, blockedAt: null, dropped: 0, lastSyncedSeq: 1 };
+
+	function setupTwoDevices() {
+		const context = setup();
+		putPacket(context.adapter, [delta(1)]);
+		const packet = buildPacket(other, [delta(1)]);
+		context.adapter.files.set(packetFileName(packet), JSON.stringify(packet));
+		const dropCalls = () =>
+			context.repository.applyRemoteDeltas.mock.calls.filter((call) => call[3]?.dropFirstOrphan).map((call) => call[0]);
+		return { ...context, dropCalls };
+	}
+
+	it('gives up on only the oldest blocked change when nothing moved, and reports it', async () => {
+		const { repository, service, dropCalls } = setupTwoDevices();
+		repository.applyRemoteDeltas.mockImplementation(async (peerId, _name, _deltas, options) =>
+			options?.dropFirstOrphan
+				? { ...moved, dropped: 1 }
+				: blocked(peerId === 'pull:dev-other' ? '2026-01-01T00:00:00.000Z' : '2026-06-01T00:00:00.000Z')
+		);
+
+		const state = await service.syncNow();
+
+		expect(dropCalls()).toEqual(['pull:dev-other']);
+		expect(state.status).toBe('idle');
+		expect(state.lastSummary?.droppedOrphans).toBe(1);
+	});
+
+	it('keeps waiting while another device is still making progress', async () => {
+		const { repository, service, dropCalls } = setupTwoDevices();
+		repository.applyRemoteDeltas.mockImplementation(async (peerId) =>
+			peerId === 'pull:dev-peer' ? blocked('2026-01-01T00:00:00.000Z') : moved
+		);
+
+		await service.syncNow();
+
+		expect(dropCalls()).toEqual([]);
+	});
+
+	it('keeps waiting when a packet could not be read, since it may hold the parent', async () => {
+		const { adapter, repository, service, dropCalls } = setupTwoDevices();
+		adapter.files.set(packetFileName({ ...other, startSeq: 1, endSeq: 1 }), 'not json');
+		repository.applyRemoteDeltas.mockImplementation(async () => blocked('2026-01-01T00:00:00.000Z'));
+
+		await service.syncNow();
+
+		expect(dropCalls()).toEqual([]);
 	});
 });
 

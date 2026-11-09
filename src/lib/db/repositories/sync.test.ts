@@ -32,7 +32,7 @@ import {
 	type DatabaseSnapshot,
 	type OutboxEntry
 } from './sync';
-import { createBike, createCustomer } from '../repositories';
+import { createBike, createCustomer, deleteCustomer } from '../repositories';
 import { createWorkOrder } from './workOrders';
 
 const sqlite3 = await sqlite3InitModule();
@@ -371,6 +371,57 @@ describe('applyRemoteDeltas', () => {
 		const retry = await applyRemoteDeltas(pullPeerId('dev-b'), 'B', chain);
 		expect(retry).toMatchObject({ applied: 3, blocked: false, lastSyncedSeq: 3 });
 		expect(queryRows('SELECT id FROM work_orders')).toEqual([{ id: 'w1' }]);
+	});
+
+	it('drops only the first orphan when told to, then stops at the next one', async () => {
+		const orphan = (seq: number) =>
+			remote(seq, 'bike', 'INSERT', `b${seq}`, { id: `b${seq}`, customer_id: 'gone', brand: 'Trek', model: 'Domane' });
+
+		const result = await applyRemoteDeltas(
+			pullPeerId('dev-b'),
+			'B',
+			[orphan(1), remote(2, 'customer', 'INSERT', 'c9', { id: 'c9', name: 'Bo' }), orphan(3)],
+			{ dropFirstOrphan: true }
+		);
+
+		expect(result).toMatchObject({
+			applied: 1,
+			dropped: 1,
+			blocked: true,
+			blockedAt: '2026-11-07T10:00:00.000Z',
+			lastSyncedSeq: 2
+		});
+		expect(queryRows('SELECT id FROM customers')).toEqual([{ id: 'c9' }]);
+		expect(queryRows('SELECT id FROM bikes')).toEqual([]);
+	});
+
+	it('replays a peer after a restore, so rows newer than the backup come back', async () => {
+		const peer = pullPeerId('dev-b');
+		const older = remote(1, 'customer', 'INSERT', 'c1', { id: 'c1', name: 'Ana' });
+		const newer = remote(2, 'customer', 'INSERT', 'c2', { id: 'c2', name: 'Bo' });
+		await applyRemoteDeltas(peer, 'B', [older]);
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		await applyRemoteDeltas(peer, 'B', [newer]);
+
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+		expect(queryRows('SELECT id FROM customers')).toEqual([{ id: 'c1' }]);
+
+		await applyRemoteDeltas(peer, 'B', [older, newer]);
+		expect(queryRows('SELECT id FROM customers ORDER BY id')).toEqual([{ id: 'c1' }, { id: 'c2' }]);
+	});
+
+	it('does not bring back a record this device deleted when a restore replays a peer', async () => {
+		const peer = pullPeerId('dev-b');
+		const created = remote(1, 'customer', 'INSERT', 'c1', { id: 'c1', name: 'Ana' });
+		await applyRemoteDeltas(peer, 'B', [created]);
+		await deleteCustomer('c1');
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+		const replay = await applyRemoteDeltas(peer, 'B', [created]);
+
+		expect(replay).toMatchObject({ blocked: false, lastSyncedSeq: 1 });
+		expect(queryRows('SELECT id FROM customers')).toEqual([]);
 	});
 
 	it('applies DELETE events', async () => {

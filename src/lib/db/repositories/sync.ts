@@ -448,6 +448,12 @@ export async function importSnapshot(
       }
     }
 
+    // The restored rows are older than these cursors claim. Forget them so the next sync replays other
+    // devices' packets; last-write-wins then brings back anything newer than the backup.
+    await connection.exec("DELETE FROM peer_sync_state WHERE peer_id LIKE ?", {
+      bind: [`${PULL_PEER_PREFIX}%`],
+    });
+
     const tipRows = (await connection.exec(
       "SELECT COALESCE(MAX(seq), 0) AS tip FROM sync_outbox",
       {
@@ -483,7 +489,17 @@ export interface ApplyRemoteResult {
   // Set when a delta pointed at a parent row that has not arrived yet. Processing stopped there and the
   // cursor stays just before that delta, so the next sync cycle retries it (and everything after it).
   blocked: boolean;
+  // created_at of the delta that blocked; null when not blocked.
+  blockedAt: string | null;
+  // Orphans given up on (see dropFirstOrphan); 0 or 1.
+  dropped: number;
   lastSyncedSeq: number;
+}
+
+export interface ApplyRemoteOptions {
+  // Move past the first delta whose parent is missing instead of stopping. Only the sync service sets this,
+  // once it has established that the parent can no longer arrive.
+  dropFirstOrphan?: boolean;
 }
 
 type Payload = Record<string, unknown>;
@@ -536,9 +552,9 @@ function requireInteger(payload: Payload, key: string): number {
 }
 
 // KNOWN LIMITS of this sync design (accepted for a small shop with 1-3 devices):
-// - Deletes leave no tombstone. If device A deletes a record while device B (offline) edits it, B's later
-//   UPDATE re-creates the row on A (when its parent still exists) while B applies A's DELETE, so the two
-//   devices disagree until someone deletes it again. A fix would add a deleted_at tombstone per entity.
+// - Deletes leave no tombstone. A device remembers its own deletes only while they are in its outbox (about
+//   30 days, see deletedOnThisDevice). Past that, a replayed or late UPDATE from another device re-creates the
+//   row here (when its parent still exists). A full fix would add a deleted_at tombstone per entity.
 // - Last-write-wins compares updated_at values written by each device's own clock. A device whose clock is
 //   badly wrong wins conflicts it should lose. Keep tablet clocks on automatic time.
 // Customers, bikes, work orders, bike components and menu items all use last-write-wins on updated_at.
@@ -841,6 +857,20 @@ function isForeignKeyError(error: unknown): boolean {
   return error instanceof Error && /FOREIGN KEY/i.test(error.message);
 }
 
+// A device never re-reads its own packets, so when a restore replays other devices' history their old
+// INSERT/UPDATE would bring back records this device deleted. Its outbox still knows about those deletes.
+// shortcut: only sees deletes still in the outbox (about 30 days), add tombstones if older ones matter.
+async function deletedOnThisDevice(delta: OutboxEntry): Promise<boolean> {
+  if (delta.action === "DELETE") return false;
+  const row = await selectOne<{ found: number }>(
+    `SELECT 1 AS found FROM sync_outbox
+		 WHERE entity_type = ? AND entity_id = ? AND action = 'DELETE'
+		 LIMIT 1`,
+    [delta.entity_type, delta.entity_id],
+  );
+  return row !== null;
+}
+
 // Apply a remote device's deltas and advance its pull cursor in ONE transaction, so a crash can never
 // leave rows applied without the cursor (or the reverse). Deltas at or below the cursor are ignored,
 // which makes retries and overlapping packets safe. Applied rows are NOT written to sync_outbox,
@@ -851,15 +881,24 @@ export async function applyRemoteDeltas(
   peerId: string,
   peerName: string,
   deltas: OutboxEntry[],
+  options: ApplyRemoteOptions = {},
 ): Promise<ApplyRemoteResult> {
   return inTransaction(async (connection) => {
     const peer = await getPeerState(peerId);
     let cursor = peer?.last_synced_seq ?? 0;
     let applied = 0;
-    let blocked = false;
+    let dropped = 0;
+    let blockedAt: string | null = null;
 
     for (const delta of [...deltas].sort((a, b) => a.seq - b.seq)) {
       if (delta.seq <= cursor) continue;
+
+      // Counted as applied, like a change that loses last-write-wins: the stream moved forward.
+      if (await deletedOnThisDevice(delta)) {
+        applied++;
+        cursor = delta.seq;
+        continue;
+      }
 
       await connection.exec("SAVEPOINT remote_delta");
       try {
@@ -871,13 +910,27 @@ export async function applyRemoteDeltas(
         await connection.exec("ROLLBACK TO remote_delta");
         await connection.exec("RELEASE remote_delta");
         if (!isForeignKeyError(error)) throw error;
-        blocked = true;
+        if (options.dropFirstOrphan && dropped === 0) {
+          console.warn(
+            `Sync skipped a ${delta.entity_type} change (${delta.entity_id}): its parent record is not on this device.`,
+          );
+          dropped = 1;
+          cursor = delta.seq;
+          continue;
+        }
+        blockedAt = delta.created_at;
         break;
       }
     }
 
     await writeAck(connection, peerId, peerName, cursor);
-    return { applied, blocked, lastSyncedSeq: cursor };
+    return {
+      applied,
+      blocked: blockedAt !== null,
+      blockedAt,
+      dropped,
+      lastSyncedSeq: cursor,
+    };
   });
 }
 

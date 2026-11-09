@@ -13,6 +13,9 @@ export interface SyncCycleSummary {
 	appliedDeltas: number;
 	// Packets held back because a parent row has not arrived yet; retried next cycle.
 	skippedDeltas: number;
+	// Changes given up on since the app opened because their parent record is not on this device. A running total,
+	// so the count stays on screen after the next cycle.
+	droppedOrphans: number;
 	prunedRows: number;
 }
 
@@ -37,7 +40,7 @@ export interface SyncServiceOptions {
 }
 
 export const DEFAULT_SYNC_FOLDER = '/sync';
-const LOCK_NAME = 'bike-mechanic-pad-sync';
+export const LOCK_NAME = 'bike-mechanic-pad-sync';
 const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_MAX_MS = 5 * 60_000;
 
@@ -73,6 +76,7 @@ export class SyncService {
 	private readonly listeners = new Set<(state: SyncState) => void>();
 	private inFlight: Promise<SyncState> | null = null;
 	private consecutiveFailures = 0;
+	private droppedOrphans = 0;
 	private running = false;
 	private pollTimer: ReturnType<typeof setTimeout> | null = null;
 	private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -199,7 +203,8 @@ export class SyncService {
 
 	// Upload every local delta the relay has not seen, in packets of at most `batchSize` rows.
 	private async pushPhase(): Promise<Pick<SyncCycleSummary, 'pushedPackets' | 'pushedDeltas'>> {
-		const relayId = pushPeerId(this.adapter.id);
+		// Per folder: a new folder starts empty, so "already uploaded" elsewhere must not count for it.
+		const relayId = pushPeerId(`${this.adapter.id}:${this.folderPath}`);
 		let pushedPackets = 0;
 		let pushedDeltas = 0;
 
@@ -220,7 +225,8 @@ export class SyncService {
 	}
 
 	// A taken file name means an earlier attempt already uploaded this exact range (the ack was lost).
-	// Identical content is fine; different content means two devices share an id, which must not pass silently.
+	// Identical deltas are fine (the device name may have changed since); different deltas mean two devices share an
+	// id, which must not pass silently.
 	private async uploadPacket(packet: SyncPacket): Promise<void> {
 		const name = packetFileName(packet);
 		const content = JSON.stringify(packet);
@@ -230,14 +236,20 @@ export class SyncService {
 		} catch (error) {
 			if (!(error instanceof CloudError && error.kind === 'conflict')) throw error;
 			const existing = await this.adapter.downloadFile(this.folderPath, name);
-			if (existing !== content) {
+			let existingDeltas: unknown;
+			try {
+				existingDeltas = (JSON.parse(existing) as Partial<SyncPacket>).deltas;
+			} catch {
+				/* unreadable counts as different */
+			}
+			if (JSON.stringify(existingDeltas) !== JSON.stringify(packet.deltas)) {
 				throw new CloudError('conflict', `Remote packet ${name} already exists with different content.`, { cause: error });
 			}
 		}
 	}
 
 	// Apply packets from other devices, oldest first per device. One device's bad packet stops only that device.
-	private async pullPhase(): Promise<Pick<SyncCycleSummary, 'pulledPackets' | 'appliedDeltas' | 'skippedDeltas'>> {
+	private async pullPhase(): Promise<Pick<SyncCycleSummary, 'pulledPackets' | 'appliedDeltas' | 'skippedDeltas' | 'droppedOrphans'>> {
 		const files = await this.adapter.listFiles(this.folderPath);
 		const byDevice = new Map<string, PacketRef[]>();
 		for (const file of files) {
@@ -250,6 +262,7 @@ export class SyncService {
 		let appliedDeltas = 0;
 		let skippedDeltas = 0;
 		const failures: unknown[] = [];
+		const stalled: Array<{ peerId: string; packet: SyncPacket; blockedAt: string }> = [];
 
 		for (const [deviceId, refs] of byDevice) {
 			const peerId = pullPeerId(deviceId);
@@ -266,6 +279,7 @@ export class SyncService {
 					if (result.blocked) {
 						// A parent row from another device has not arrived yet: retry this packet next cycle.
 						skippedDeltas++;
+						stalled.push({ peerId, packet, blockedAt: result.blockedAt ?? '' });
 						break;
 					}
 				} catch (error) {
@@ -277,7 +291,21 @@ export class SyncService {
 		}
 
 		if (failures.length > 0) throw failures[0];
-		return { pulledPackets, appliedDeltas, skippedDeltas };
+
+		// A device only writes a child after its parent reached the folder, so when every packet was read and nothing
+		// moved, the parent is not coming: it was deleted, restored away on this device, or older than the folder's
+		// history. Retrying is pointless. Give up on the oldest blocked change only: a parent of the oldest cannot be
+		// hiding behind a newer block, but a newer block's parent can be behind the oldest.
+		if (appliedDeltas === 0 && stalled.length > 0) {
+			const oldest = stalled.reduce((a, b) => (b.blockedAt < a.blockedAt ? b : a));
+			const result = await this.repository.applyRemoteDeltas(oldest.peerId, oldest.packet.deviceName, oldest.packet.deltas, {
+				dropFirstOrphan: true
+			});
+			appliedDeltas += result.applied;
+			this.droppedOrphans += result.dropped;
+		}
+
+		return { pulledPackets, appliedDeltas, skippedDeltas, droppedOrphans: this.droppedOrphans };
 	}
 
 	// Housekeeping only: a failure here must not mark an otherwise successful sync as failed.

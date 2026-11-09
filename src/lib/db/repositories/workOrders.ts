@@ -235,10 +235,14 @@ async function assertEditable(workOrderId: string): Promise<void> {
 	}
 }
 
-export async function getWorkOrder(workOrderId: string): Promise<WorkOrder | null> {
-	const [row] = await selectRows<WorkOrderRow>('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
-	if (!row) return null;
-	return { ...row, items: await loadItems(workOrderId) };
+// In the transaction queue so it never sees a sync halfway through rewriting this order's line items.
+// Do not call from inside inTransaction.
+export function getWorkOrder(workOrderId: string): Promise<WorkOrder | null> {
+	return inTransaction(async () => {
+		const [row] = await selectRows<WorkOrderRow>('SELECT * FROM work_orders WHERE id = ?', [workOrderId]);
+		if (!row) return null;
+		return { ...row, items: await loadItems(workOrderId) };
+	});
 }
 
 export async function listWorkOrders(statuses?: readonly WorkOrderStatus[]): Promise<WorkOrderSummary[]> {

@@ -72,8 +72,13 @@ async function loadItem(id: string): Promise<ServiceMenuItem> {
 }
 
 // Write the full row and queue it; the whole row is the sync payload (last-write-wins on updated_at).
-async function saveItem(row: ServiceMenuItem, action: 'INSERT' | 'UPDATE'): Promise<void> {
-	await inTransaction(async (connection) => {
+// `build` runs inside the transaction so an edit never writes back fields read before a sync landed.
+async function saveItem(
+	action: 'INSERT' | 'UPDATE',
+	build: () => ServiceMenuItem | Promise<ServiceMenuItem>
+): Promise<ServiceMenuItem> {
+	const saved = await inTransaction(async (connection) => {
+		const row = await build();
 		await connection.exec(
 			`INSERT INTO service_menu_items
 			   (id, category, name, default_price_cents, item_type, component_tag, archived_at, created_at, updated_at)
@@ -97,8 +102,10 @@ async function saveItem(row: ServiceMenuItem, action: 'INSERT' | 'UPDATE'): Prom
 			}
 		);
 		await appendMutation({ entity_type: 'service_menu_item', entity_id: row.id, action, payload: { ...row } });
+		return row;
 	});
 	notifyLocalWrite();
+	return saved;
 }
 
 export async function createServiceMenuItem(input: ServiceMenuItemInput): Promise<ServiceMenuItem> {
@@ -111,20 +118,17 @@ export async function createServiceMenuItem(input: ServiceMenuItemInput): Promis
 		created_at: now,
 		updated_at: now
 	};
-	await saveItem(row, 'INSERT');
-	return row;
+	return saveItem('INSERT', () => row);
 }
 
 export async function updateServiceMenuItem(id: string, input: ServiceMenuItemInput): Promise<ServiceMenuItem> {
-	const current = await loadItem(id);
-	const row: ServiceMenuItem = { ...current, ...validate(input), updated_at: new Date().toISOString() };
-	await saveItem(row, 'UPDATE');
-	return row;
+	const fields = validate(input);
+	return saveItem('UPDATE', async () => ({ ...(await loadItem(id)), ...fields, updated_at: new Date().toISOString() }));
 }
 
 export async function setServiceMenuItemArchived(id: string, archived: boolean): Promise<ServiceMenuItem> {
-	const now = new Date().toISOString();
-	const row: ServiceMenuItem = { ...(await loadItem(id)), archived_at: archived ? now : null, updated_at: now };
-	await saveItem(row, 'UPDATE');
-	return row;
+	return saveItem('UPDATE', async () => {
+		const now = new Date().toISOString();
+		return { ...(await loadItem(id)), archived_at: archived ? now : null, updated_at: now };
+	});
 }

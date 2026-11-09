@@ -149,6 +149,11 @@
 					<dd class="text-right font-mono text-neutral-200">{summary.pushedDeltas} changes</dd>
 					<dt>Received</dt>
 					<dd class="text-right font-mono text-neutral-200">{summary.appliedDeltas} changes</dd>
+					{#if summary.droppedOrphans > 0}
+						<dt>Skipped (parent record missing on this device)</dt>
+						<dd class="text-right font-mono text-amber-300">{summary.droppedOrphans} changes</dd>
+						<dd class="col-span-2 text-xs text-neutral-400">To get these back, restore a recent backup made on a device that has the missing records.</dd>
+					{/if}
 				</dl>
 			{/if}
 		</section>
@@ -197,7 +202,7 @@
 						autocapitalize="off"
 						spellcheck="false"
 					/>
-					<p class="text-xs text-neutral-500">Use the same folder on every device. Changing it after syncing starts a fresh folder; only do that on purpose.</p>
+					<p class="text-xs text-neutral-500">Use the same folder on every device. Changing it after syncing starts a fresh folder holding only about the last 30 days of this device's changes, so a device set up on it later will be missing older records. Only do that on purpose.</p>
 				</div>
 
 				{#if redirectUri}

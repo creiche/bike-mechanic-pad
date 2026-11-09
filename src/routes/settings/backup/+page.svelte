@@ -8,6 +8,7 @@
 		SnapshotValidationError
 	} from '../../../lib/db/backup';
 	import { syncService } from '../../../lib/sync/runtime';
+	import { LOCK_NAME } from '../../../lib/sync/syncService';
 	import {
 		cardClass,
 		dangerButton,
@@ -52,7 +53,7 @@
 			document.body.append(link);
 			link.click();
 			link.remove();
-			URL.revokeObjectURL(url);
+			setTimeout(() => URL.revokeObjectURL(url), 40_000); // Safari can cancel the download if released right away
 			return `Backup saved as ${link.download}.`;
 		});
 	}
@@ -68,7 +69,9 @@
 				return 'Restore cancelled.';
 			}
 			const identity = syncService.getIdentity();
-			await restoreBackup(json, `pull:${identity.deviceId}`, identity.deviceName);
+			const restore = () => restoreBackup(json, `pull:${identity.deviceId}`, identity.deviceName);
+			// Wait for a running sync: it could otherwise move a pull cursor past history the restore needs replayed.
+			await (navigator.locks ? navigator.locks.request(LOCK_NAME, restore) : restore());
 			return `Backup restored from ${file.name}.`;
 		});
 	}
@@ -111,7 +114,7 @@
 
 		<section class={cardClass} aria-label="Restore">
 			<h2 class="text-lg font-semibold">Restore</h2>
-			<p class="mb-4 mt-1 text-sm text-neutral-400">Replaces everything on this device with the contents of a backup file. The file is checked first; a bad file changes nothing.</p>
+			<p class="mb-4 mt-1 text-sm text-neutral-400">Replaces everything on this device with the contents of a backup file. The file is checked first; a bad file changes nothing. If sync is on, newer changes from your other devices come back on the next sync.</p>
 			<label class="block text-sm">
 				<span class={labelTextClass}>Restore from Backup</span>
 				<input class={inputClass} type="file" accept="application/json,.json" disabled={busy} onchange={restoreFromFile} />
