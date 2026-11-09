@@ -1,9 +1,11 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import BikeLedger from '../../../lib/components/BikeLedger.svelte';
 	import { COMPONENT_TYPES, componentLabel, isComponentType } from '../../../lib/domain/componentTypes';
+	import { reconcileForm } from '../../../lib/domain/formReconcile';
 	import { centsToInput, formatCents, lineTotalCents, parseCents } from '../../../lib/domain/money';
 	import { STATUS_BADGE_CLASSES, STATUS_LABELS } from '../../../lib/domain/workOrderStatus';
 	import { getBike, getCustomer, type Bike, type Customer } from '../../../lib/db/repositories';
@@ -26,6 +28,8 @@
 		listServiceMenuItems,
 		type ServiceMenuItem
 	} from '../../../lib/db/repositories/serviceMenu';
+	import { syncService } from '../../../lib/sync/runtime';
+	import { onRemoteChanges } from '../../../lib/sync/syncService';
 	import {
 		cardClass,
 		dangerButton,
@@ -48,7 +52,19 @@
 	let notice = $state('');
 	let ledgerVersion = $state(0);
 
+	const detailsToForm = (source: WorkOrder) => ({ issue_summary: source.issue_summary, notes: source.notes ?? '' });
+	const itemToForm = (item: WorkOrderItem) => ({
+		item_type: item.item_type,
+		description: item.description,
+		quantity: String(item.quantity),
+		price: centsToInput(item.unit_price_cents),
+		component_type: item.component_type ?? ''
+	});
+
 	let details = $state({ issue_summary: '', notes: '' });
+	// The record as each open edit form last saw it (see reconcileForm).
+	let detailsBase = { issue_summary: '', notes: '' };
+	let itemBase: ReturnType<typeof itemToForm> | null = null;
 	let menuItems = $state<ServiceMenuItem[]>([]);
 	let menuQuery = $state('');
 	const menuMatches = $derived(filterServiceMenu(menuItems, menuQuery));
@@ -82,6 +98,54 @@
 		void load(workOrderId);
 	});
 
+	onMount(() => onRemoteChanges(syncService, () => void refreshFromSync()));
+
+	// Runs while the mechanic may be typing, so it never clears a form or shows the loading state.
+	async function refreshFromSync() {
+		if (busy) return;
+		try {
+			await reconcileOpenForms();
+			if (order) {
+				bike = await getBike(order.bike_id);
+				customer = bike ? await getCustomer(bike.customer_id) : null;
+			}
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	// Reloads the order and merges it into the open forms. False means the mechanic needs to look before saving.
+	async function reconcileOpenForms(): Promise<boolean> {
+		const id = order?.id;
+		if (!id) return false;
+
+		const fresh = await getWorkOrder(id);
+		if (id !== workOrderId) return false;
+		order = fresh; // null shows the "no longer exists" card
+		if (!fresh) return false;
+
+		const merged = reconcileForm(details, detailsBase, detailsToForm(fresh));
+		details = merged.form;
+		detailsBase = merged.base;
+		let conflict = merged.conflict;
+
+		if (editingItemId && itemBase) {
+			const item = fresh.items.find((candidate) => candidate.id === editingItemId);
+			if (item) {
+				const mergedItem = reconcileForm(itemForm, itemBase, itemToForm(item));
+				itemForm = mergedItem.form;
+				itemBase = mergedItem.base;
+				conflict ??= mergedItem.conflict;
+			} else {
+				resetItemForm();
+				conflict ??= 'The line item you were editing was removed on another device.';
+			}
+		}
+
+		if (conflict) errorMessage = conflict;
+		return !conflict;
+	}
+
 	async function load(id: string) {
 		isLoading = true;
 		errorMessage = '';
@@ -95,7 +159,8 @@
 			bike = null;
 			customer = null;
 			if (order) {
-				details = { issue_summary: order.issue_summary, notes: order.notes ?? '' };
+				details = detailsToForm(order);
+				detailsBase = detailsToForm(order);
 				bike = await getBike(order.bike_id);
 				customer = bike ? await getCustomer(bike.customer_id) : null;
 			}
@@ -149,12 +214,15 @@
 		if (!order) return;
 		const current = order;
 		void run(async () => {
+			if (!(await reconcileOpenForms())) return;
+
 			const next = await updateWorkOrder(current.id, {
 				issue_summary: details.issue_summary,
 				notes: details.notes.trim() || null
 			});
 			applyOrder(next);
-			details = { issue_summary: next.issue_summary, notes: next.notes ?? '' };
+			details = detailsToForm(next);
+			detailsBase = detailsToForm(next);
 		});
 	}
 
@@ -165,41 +233,38 @@
 
 	function startEditItem(item: WorkOrderItem) {
 		editingItemId = item.id;
-		itemForm = {
-			item_type: item.item_type,
-			description: item.description,
-			quantity: String(item.quantity),
-			price: centsToInput(item.unit_price_cents),
-			component_type: item.component_type ?? ''
-		};
+		itemBase = itemToForm(item);
+		itemForm = { ...itemBase };
 	}
 
 	function submitItem(event: SubmitEvent) {
 		event.preventDefault();
 		if (!order) return;
 		const current = order;
-
-		const quantity = Number(itemForm.quantity);
-		const unitPriceCents = parseCents(itemForm.price);
-		if (!Number.isSafeInteger(quantity) || quantity < 1) {
-			errorMessage = 'Quantity must be a whole number of 1 or more.';
-			return;
-		}
-		if (unitPriceCents === null) {
-			errorMessage = 'Enter the unit price as dollars and cents, like 45.00.';
-			return;
-		}
-
-		const fields = {
-			item_type: itemForm.item_type,
-			description: itemForm.description,
-			quantity,
-			unit_price_cents: unitPriceCents,
-			component_type: isComponentType(itemForm.component_type) ? itemForm.component_type : null
-		};
 		const itemId = editingItemId;
 
 		void run(async () => {
+			if (itemId && !(await reconcileOpenForms())) return;
+
+			// Read after reconciling, so fields the mechanic left alone carry the latest values.
+			const quantity = Number(itemForm.quantity);
+			const unitPriceCents = parseCents(itemForm.price);
+			if (!Number.isSafeInteger(quantity) || quantity < 1) {
+				errorMessage = 'Quantity must be a whole number of 1 or more.';
+				return;
+			}
+			if (unitPriceCents === null) {
+				errorMessage = 'Enter the unit price as dollars and cents, like 45.00.';
+				return;
+			}
+
+			const fields = {
+				item_type: itemForm.item_type,
+				description: itemForm.description,
+				quantity,
+				unit_price_cents: unitPriceCents,
+				component_type: isComponentType(itemForm.component_type) ? itemForm.component_type : null
+			};
 			applyOrder(itemId ? await updateWorkOrderItem(itemId, fields) : await addWorkOrderItem(current.id, fields));
 			resetItemForm();
 		});

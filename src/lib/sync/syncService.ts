@@ -44,6 +44,20 @@ export const LOCK_NAME = 'bike-mechanic-pad-sync';
 const BACKOFF_BASE_MS = 2_000;
 const BACKOFF_MAX_MS = 5 * 60_000;
 
+// Calls `listener` after each finished sync cycle that received changes, so open screens can reload.
+// Stores call subscribers straight away with the current state; that first call is not a new cycle.
+export function onRemoteChanges(
+	store: { subscribe(listener: (state: Pick<SyncState, 'lastSummary'>) => void): () => void },
+	listener: () => void
+): () => void {
+	let seen: SyncCycleSummary | null | undefined;
+	return store.subscribe(({ lastSummary }) => {
+		const isNewCycle = seen !== undefined && lastSummary !== seen;
+		seen = lastSummary;
+		if (isNewCycle && lastSummary && lastSummary.appliedDeltas > 0) listener();
+	});
+}
+
 // Exponential backoff with "equal jitter": half fixed, half random, so devices do not retry in lockstep.
 export function computeBackoffMs(failures: number, random: () => number = Math.random): number {
 	const ceiling = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.max(0, failures - 1));

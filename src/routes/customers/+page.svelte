@@ -8,13 +8,18 @@
 		createCustomer,
 		deleteBike,
 		deleteCustomer,
+		getBike,
 		getBikesForCustomer,
+		getCustomer,
 		getCustomers,
 		updateBike,
 		updateCustomer,
 		type Bike,
 		type Customer
 	} from '../../lib/db/repositories';
+	import { reconcileForm } from '../../lib/domain/formReconcile';
+	import { syncService } from '../../lib/sync/runtime';
+	import { onRemoteChanges } from '../../lib/sync/syncService';
 	import {
 		cardClass,
 		dangerButton,
@@ -28,6 +33,26 @@
 
 	const emptyCustomerForm = { name: '', phone: '', email: '', notes: '' };
 	const emptyBikeForm = { brand: '', model: '', year: '', color: '', serial_number: '', notes: '' };
+
+	const customerToForm = (customer: Customer) => ({
+		name: customer.name,
+		phone: customer.phone ?? '',
+		email: customer.email ?? '',
+		notes: customer.notes ?? ''
+	});
+	const bikeToForm = (bike: Bike) => ({
+		brand: bike.brand,
+		model: bike.model,
+		year: bike.year === null ? '' : String(bike.year),
+		color: bike.color ?? '',
+		serial_number: bike.serial_number ?? '',
+		notes: bike.notes ?? ''
+	});
+	const parseYear = (value: string) => (value ? Number(value) : null);
+
+	// The record as each open edit form last saw it (see reconcileForm).
+	let customerBase = { ...emptyCustomerForm };
+	let bikeBase = { ...emptyBikeForm };
 
 	let customers = $state<Customer[]>([]);
 	let selectedCustomerId = $state('');
@@ -48,8 +73,61 @@
 		await loadCustomers();
 	});
 
-	async function loadCustomers() {
-		isLoading = true;
+	onMount(() => onRemoteChanges(syncService, () => void refreshFromSync()));
+
+	// Runs while the mechanic may be typing, so it never clears a form or shows the loading state.
+	async function refreshFromSync() {
+		if (busy) return;
+		try {
+			await loadCustomers(true);
+			await reconcileCustomerForm();
+			await reconcileBikeForm();
+		} catch (error) {
+			errorMessage = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	// Each reconcile returns false when the mechanic needs to look at the form before it can be saved.
+	async function reconcileCustomerForm(): Promise<boolean> {
+		const id = editingCustomerId;
+		if (!id) return true;
+
+		const fresh = await getCustomer(id);
+		if (editingCustomerId !== id) return false;
+		if (!fresh) {
+			resetCustomerForm();
+			errorMessage = 'This customer was deleted on another device.';
+			return false;
+		}
+
+		const result = reconcileForm(customerForm, customerBase, customerToForm(fresh));
+		customerForm = result.form;
+		customerBase = result.base;
+		if (result.conflict) errorMessage = result.conflict;
+		return !result.conflict;
+	}
+
+	async function reconcileBikeForm(): Promise<boolean> {
+		const id = editingBikeId;
+		if (!id) return true;
+
+		const fresh = await getBike(id);
+		if (editingBikeId !== id) return false;
+		if (!fresh) {
+			resetBikeForm();
+			errorMessage = 'This bike was deleted on another device.';
+			return false;
+		}
+
+		const result = reconcileForm(bikeForm, bikeBase, bikeToForm(fresh));
+		bikeForm = result.form;
+		bikeBase = result.base;
+		if (result.conflict) errorMessage = result.conflict;
+		return !result.conflict;
+	}
+
+	async function loadCustomers(quiet = false) {
+		isLoading = !quiet;
 
 		try {
 			customers = await getCustomers();
@@ -100,15 +178,18 @@
 			return;
 		}
 
-		const fields = {
-			name: customerForm.name,
-			phone: customerForm.phone || null,
-			email: customerForm.email || null,
-			notes: customerForm.notes || null
-		};
 		const editingId = editingCustomerId;
 
 		void run(async () => {
+			if (!(await reconcileCustomerForm())) return;
+
+			// Read after reconciling, so fields the mechanic left alone carry the latest values.
+			const fields = {
+				name: customerForm.name,
+				phone: customerForm.phone || null,
+				email: customerForm.email || null,
+				notes: customerForm.notes || null
+			};
 			const saved = editingId ? await updateCustomer(editingId, fields) : await createCustomer(fields);
 			selectedCustomerId = saved.id;
 			resetCustomerForm();
@@ -118,12 +199,8 @@
 
 	function startEditCustomer(customer: Customer) {
 		editingCustomerId = customer.id;
-		customerForm = {
-			name: customer.name,
-			phone: customer.phone ?? '',
-			email: customer.email ?? '',
-			notes: customer.notes ?? ''
-		};
+		customerBase = customerToForm(customer);
+		customerForm = { ...customerBase };
 	}
 
 	function handleBikeSubmit(event: SubmitEvent) {
@@ -138,24 +215,27 @@
 			return;
 		}
 
-		const year = bikeForm.year ? Number(bikeForm.year) : null;
+		const year = parseYear(bikeForm.year);
 		if (year !== null && !Number.isSafeInteger(year)) {
 			errorMessage = 'Bike year must be a whole number.';
 			return;
 		}
 
-		const fields = {
-			brand: bikeForm.brand,
-			model: bikeForm.model,
-			year,
-			color: bikeForm.color || null,
-			serial_number: bikeForm.serial_number || null,
-			notes: bikeForm.notes || null
-		};
 		const editingId = editingBikeId;
 		const customerId = selectedCustomerId;
 
 		void run(async () => {
+			if (!(await reconcileBikeForm())) return;
+
+			// Read after reconciling, so fields the mechanic left alone carry the latest values.
+			const fields = {
+				brand: bikeForm.brand,
+				model: bikeForm.model,
+				year: parseYear(bikeForm.year),
+				color: bikeForm.color || null,
+				serial_number: bikeForm.serial_number || null,
+				notes: bikeForm.notes || null
+			};
 			if (editingId) {
 				await updateBike(editingId, fields);
 			} else {
@@ -168,14 +248,8 @@
 
 	function startEditBike(bike: Bike) {
 		editingBikeId = bike.id;
-		bikeForm = {
-			brand: bike.brand,
-			model: bike.model,
-			year: bike.year === null ? '' : String(bike.year),
-			color: bike.color ?? '',
-			serial_number: bike.serial_number ?? '',
-			notes: bike.notes ?? ''
-		};
+		bikeBase = bikeToForm(bike);
+		bikeForm = { ...bikeBase };
 	}
 
 	function handleDeleteBike(bike: Bike) {

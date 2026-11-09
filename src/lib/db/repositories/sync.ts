@@ -855,6 +855,15 @@ async function applyBikeComponent(
   );
   if (existing && existing.updated_at > updatedAt) return;
 
+  // Same result as the schema's ON DELETE SET NULL: a deleted order must not cost the service date.
+  const workOrderId = optionalString(payload, "work_order_id");
+  const linkedOrder = workOrderId
+    ? await selectOne<{ id: string }>(
+        "SELECT id FROM work_orders WHERE id = ?",
+        [workOrderId],
+      )
+    : null;
+
   await connection.exec(
     `INSERT INTO bike_components
 		   (id, bike_id, component_type, last_serviced_date, work_order_id, notes, created_at, updated_at)
@@ -869,7 +878,7 @@ async function applyBikeComponent(
         bikeId,
         componentType,
         requireString(payload, "last_serviced_date"),
-        optionalString(payload, "work_order_id"),
+        linkedOrder?.id ?? null,
         optionalString(payload, "notes"),
         optionalString(payload, "created_at") ?? delta.created_at,
         updatedAt,

@@ -627,6 +627,18 @@ describe('component ledger sync', () => {
 		expect(queryRows('SELECT id FROM bike_components')).toEqual([]);
 	});
 
+	it('keeps the service date and clears the link when the work order is gone', async () => {
+		const result = await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [
+			...remoteChain().slice(0, 2),
+			remote(4, 'bike_component', 'INSERT', 'k1', component('k1', '2026-11-07T10:00:00.000Z', '2026-11-07'))
+		]);
+
+		expect(result).toMatchObject({ blocked: false, dropped: 0, lastSyncedSeq: 4 });
+		expect(queryRows('SELECT last_serviced_date, work_order_id FROM bike_components')).toEqual([
+			{ last_serviced_date: '2026-11-07', work_order_id: null }
+		]);
+	});
+
 	it('keeps one row per (bike, component) when two devices created it with different ids; newest wins', async () => {
 		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', remoteChain());
 		await applyRemoteDeltas(pullPeerId('dev-b'), 'B', [

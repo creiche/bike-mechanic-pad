@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ApplyRemoteOptions, ApplyRemoteResult, OutboxEntry, SyncRepository } from '../db/repositories/sync';
 import { CloudError, type CloudStorageAdapter, type RemoteFile } from './cloud/types';
 import { buildPacket, packetFileName, parsePacket } from './packet';
-import { computeBackoffMs, SyncService } from './syncService';
+import { computeBackoffMs, onRemoteChanges, SyncService } from './syncService';
 
 const FOLDER = '/sync';
 const self = { deviceId: 'dev-self', deviceName: 'Stand iPad' };
@@ -396,6 +396,43 @@ describe('SyncService requestSync', () => {
 		await vi.advanceTimersByTimeAsync(5_000);
 
 		expect(ensureFolder).not.toHaveBeenCalled();
+	});
+});
+
+describe('onRemoteChanges', () => {
+	const summary = (appliedDeltas: number) => ({
+		pushedPackets: 0,
+		pushedDeltas: 0,
+		pulledPackets: 0,
+		appliedDeltas,
+		skippedDeltas: 0,
+		droppedOrphans: 0,
+		prunedRows: 0
+	});
+
+	it('fires once per finished cycle that received changes, never for the state at subscribe time', () => {
+		let emit: (state: { lastSummary: ReturnType<typeof summary> | null }) => void = () => {};
+		const previous = summary(5);
+		const store = {
+			subscribe(listener: typeof emit) {
+				emit = listener;
+				listener({ lastSummary: previous });
+				return () => {};
+			}
+		};
+		const listener = vi.fn();
+
+		onRemoteChanges(store, listener);
+		expect(listener).not.toHaveBeenCalled();
+
+		emit({ lastSummary: previous }); // a "syncing" update keeps the old summary
+		emit({ lastSummary: summary(0) });
+		expect(listener).not.toHaveBeenCalled();
+
+		const received = summary(2);
+		emit({ lastSummary: received });
+		emit({ lastSummary: received });
+		expect(listener).toHaveBeenCalledTimes(1);
 	});
 });
 
