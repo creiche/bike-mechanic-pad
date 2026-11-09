@@ -213,6 +213,12 @@ async function stampComponents(connection: SqliteConnection, workOrderId: string
 
 	const servicedOn = todayLocalDate();
 	for (const componentType of componentTypes) {
+		// shortcut: no completed_at column, so "already stamped" = ledger still links this order; upgrade by adding one.
+		const [existing] = await selectRows<{ work_order_id: string | null }>(
+			'SELECT work_order_id FROM bike_components WHERE bike_id = ? AND component_type = ?',
+			[row.bike_id, componentType]
+		);
+		if (existing?.work_order_id === workOrderId) continue;
 		await upsertBikeComponent(connection, {
 			bike_id: row.bike_id,
 			component_type: componentType,

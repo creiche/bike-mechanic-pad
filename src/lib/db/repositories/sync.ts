@@ -174,25 +174,39 @@ export async function getSyncDelta(
   peerId: string,
   limit = 500,
 ): Promise<{ deltas: OutboxEntry[]; peer: PeerSyncState | null }> {
-  const peer = await selectOne<PeerSyncState>(
-    "SELECT * FROM peer_sync_state WHERE peer_id = ?",
-    [peerId],
-  );
-  const lastSyncedSeq = peer?.last_synced_seq ?? 0;
-  const deltas = await selectRows<OutboxEntry>(
-    `SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq ASC LIMIT ?`,
-    [lastSyncedSeq, limit],
-  );
+  // Inside the transaction queue so we never read another caller's uncommitted outbox rows.
+  return inTransaction(async () => {
+    const peer = await selectOne<PeerSyncState>(
+      "SELECT * FROM peer_sync_state WHERE peer_id = ?",
+      [peerId],
+    );
+    const lastSyncedSeq = peer?.last_synced_seq ?? 0;
+    const deltas = await selectRows<OutboxEntry>(
+      `SELECT * FROM sync_outbox WHERE seq > ? ORDER BY seq ASC LIMIT ?`,
+      [lastSyncedSeq, limit],
+    );
 
-  return { deltas, peer };
+    return { deltas, peer };
+  });
 }
 
-export async function acknowledgeSync(
+export function acknowledgeSync(
   peerId: string,
   peerName: string,
   upToSeq: number,
 ): Promise<void> {
-  const connection = await openDatabase();
+  return inTransaction((connection) =>
+    writeAck(connection, peerId, peerName, upToSeq),
+  );
+}
+
+// Shared by acknowledgeSync and applyRemoteDeltas, which already holds the transaction (no nesting allowed).
+async function writeAck(
+  connection: SqliteConnection,
+  peerId: string,
+  peerName: string,
+  upToSeq: number,
+): Promise<void> {
   await connection.exec(
     `INSERT INTO peer_sync_state (peer_id, peer_name, last_synced_seq, last_seen_at)
 		 VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
@@ -204,11 +218,20 @@ export async function acknowledgeSync(
   );
 }
 
-export async function pruneStaleOutboxLogs(
+export function pruneStaleOutboxLogs(
   retentionDays = 30,
   activeWithinDays = 30,
 ): Promise<number> {
-  const connection = await openDatabase();
+  return inTransaction((connection) =>
+    pruneWithin(connection, retentionDays, activeWithinDays),
+  );
+}
+
+async function pruneWithin(
+  connection: SqliteConnection,
+  retentionDays: number,
+  activeWithinDays: number,
+): Promise<number> {
   const minActive = await selectOne<{ min_seq: number | null }>(
     `SELECT MIN(last_synced_seq) AS min_seq
 		 FROM peer_sync_state
@@ -853,7 +876,7 @@ export async function applyRemoteDeltas(
       }
     }
 
-    await acknowledgeSync(peerId, peerName, cursor);
+    await writeAck(connection, peerId, peerName, cursor);
     return { applied, blocked, lastSyncedSeq: cursor };
   });
 }

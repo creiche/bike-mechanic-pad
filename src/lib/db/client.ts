@@ -25,10 +25,13 @@ async function connect(): Promise<SqliteConnection> {
 	const worker = new Worker(new URL('./sqlite.worker.ts', import.meta.url), { type: 'module' });
 	const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 	let nextId = 1;
+	let dead = false;
 
 	// Send one request to the worker and wait for the reply carrying the same id.
 	const send = (request: DistributiveOmit<WorkerRequest, 'id'>) =>
 		new Promise<unknown>((resolve, reject) => {
+			// After a worker crash nothing will ever answer, so fail fast instead of queueing a dead request.
+			if (dead) return reject(new Error('SQLite worker terminated.'));
 			const id = nextId++;
 			pending.set(id, { resolve, reject });
 			worker.postMessage({ ...request, id } as WorkerRequest);
@@ -52,6 +55,7 @@ async function connect(): Promise<SqliteConnection> {
 			request.reject(new Error(event.message || 'SQLite worker error.'));
 		}
 		pending.clear();
+		dead = true;
 		worker.terminate();
 		connectionPromise = null;
 	};
