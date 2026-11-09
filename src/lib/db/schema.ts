@@ -146,5 +146,39 @@ CREATE INDEX IF NOT EXISTS idx_bike_components_work_order_id ON bike_components(
 -- Tags a line item with the component it services; completing the work order stamps that component.
 ALTER TABLE work_order_items ADD COLUMN component_type TEXT;
 `
+  },
+  {
+    version: 6,
+    name: 'standard service menu',
+    sql: `
+-- Shop price list used to quick-add work order line items. archived_at hides an item without losing it.
+CREATE TABLE IF NOT EXISTS service_menu_items (
+  id TEXT PRIMARY KEY,
+  category TEXT NOT NULL,
+  name TEXT NOT NULL,
+  default_price_cents INTEGER NOT NULL CHECK (default_price_cents >= 0),
+  item_type TEXT NOT NULL CHECK (item_type IN ('labor', 'part')),
+  component_tag TEXT,
+  archived_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- Fixed seed ids: every device seeds the same rows, so syncing never duplicates them.
+-- The epoch updated_at makes any real edit win last-write-wins over a seed.
+INSERT OR IGNORE INTO service_menu_items (id, category, name, default_price_cents, item_type, component_tag, created_at, updated_at) VALUES
+  ('svc-seed-general-tune-up', 'package', 'General Tune-Up', 12000, 'labor', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-drivetrain-clean', 'labor', 'Drivetrain Clean', 4500, 'labor', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-chain-install', 'labor', 'Chain Install', 1500, 'labor', 'chain', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-cassette-install', 'labor', 'Cassette Install', 1500, 'labor', 'cassette', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-brake-pad-install', 'labor', 'Brake Pad Install', 2000, 'labor', 'brake_pads', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-brake-bleed', 'labor', 'Hydraulic Brake Bleed', 3500, 'labor', 'brake_bleed', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-bottom-bracket-install', 'labor', 'Bottom Bracket Install', 3000, 'labor', 'bottom_bracket', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-fork-service', 'package', 'Fork Service', 12000, 'labor', 'fork_service', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-rear-shock-service', 'package', 'Rear Shock Service', 10000, 'labor', 'rear_shock_service', '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-tire-tube-replacement', 'labor', 'Tire / Tube Replacement', 1500, 'labor', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-tube-standard', 'part', 'Inner Tube', 900, 'part', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z'),
+  ('svc-seed-chain-11-speed', 'part', 'Chain (11-speed)', 3500, 'part', NULL, '1970-01-01T00:00:00.000Z', '1970-01-01T00:00:00.000Z');
+`
   }
 ];

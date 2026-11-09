@@ -22,6 +22,11 @@
 		type WorkOrderStatus
 	} from '../../../lib/db/repositories/workOrders';
 	import {
+		filterServiceMenu,
+		listServiceMenuItems,
+		type ServiceMenuItem
+	} from '../../../lib/db/repositories/serviceMenu';
+	import {
 		cardClass,
 		dangerButton,
 		errorBannerClass,
@@ -44,6 +49,9 @@
 	let ledgerVersion = $state(0);
 
 	let details = $state({ issue_summary: '', notes: '' });
+	let menuItems = $state<ServiceMenuItem[]>([]);
+	let menuQuery = $state('');
+	const menuMatches = $derived(filterServiceMenu(menuItems, menuQuery));
 	let editingItemId = $state<string | null>(null);
 	let itemForm = $state({
 		item_type: 'part' as WorkOrderItemType,
@@ -80,6 +88,7 @@
 		notice = '';
 		resetItemForm();
 		try {
+			menuItems = await listServiceMenuItems();
 			const loaded = await getWorkOrder(id);
 			if (id !== workOrderId) return;
 			order = loaded;
@@ -193,6 +202,23 @@
 		void run(async () => {
 			applyOrder(itemId ? await updateWorkOrderItem(itemId, fields) : await addWorkOrderItem(current.id, fields));
 			resetItemForm();
+		});
+	}
+
+	// Copy a menu preset onto the order as a normal line item; Edit afterwards overrides price or text.
+	function quickAdd(preset: ServiceMenuItem) {
+		if (!order) return;
+		const current = order;
+		void run(async () => {
+			applyOrder(
+				await addWorkOrderItem(current.id, {
+					item_type: preset.item_type,
+					description: preset.name,
+					quantity: 1,
+					unit_price_cents: preset.default_price_cents,
+					component_type: preset.component_tag
+				})
+			);
 		});
 	}
 
@@ -333,6 +359,28 @@
 								This work order is {STATUS_LABELS[order.status].toLowerCase()}. Set it back to open or in progress to change line items.
 							</p>
 						{:else}
+							<div class="mb-4 space-y-3 border-t border-neutral-800 pt-4" aria-label="Quick add from service menu">
+								<h3 class="text-base font-semibold text-neutral-200">Quick add from service menu</h3>
+								<input class={inputClass} type="search" bind:value={menuQuery} placeholder="Search services..." aria-label="Search service menu" />
+								<ul class="grid max-h-64 gap-2 overflow-y-auto sm:grid-cols-2">
+									{#each menuMatches as preset (preset.id)}
+										<li>
+											<button
+												type="button"
+												class="{secondaryButton} w-full justify-between gap-3 text-left"
+												disabled={busy}
+												onclick={() => quickAdd(preset)}
+											>
+												<span>{preset.name}</span>
+												<span class="text-amber-300">{formatCents(preset.default_price_cents)}</span>
+											</button>
+										</li>
+									{:else}
+										<li class="text-sm text-neutral-400">No matching services.</li>
+									{/each}
+								</ul>
+							</div>
+
 							<form class="space-y-4 border-t border-neutral-800 pt-4" onsubmit={submitItem}>
 								<h3 class="text-base font-semibold text-neutral-200">{editingItemId ? 'Edit line item' : 'Add line item'}</h3>
 

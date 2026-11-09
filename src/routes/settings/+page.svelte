@@ -108,6 +108,7 @@
 		<header class="border-b border-neutral-800 pb-4">
 			<h1 class="text-2xl font-bold tracking-tight text-amber-500">Settings</h1>
 			<p class="text-sm text-neutral-400">Device identity and Dropbox sync. Everything stays on this device unless you connect.</p>
+			<a href={resolve('/settings/services')} class="mt-2 inline-block text-sm text-amber-400 hover:text-amber-300">Service menu &amp; prices &rarr;</a>
 		</header>
 
 		{#if errorMessage}

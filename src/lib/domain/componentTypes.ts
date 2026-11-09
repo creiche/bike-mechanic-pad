@@ -5,7 +5,8 @@ export const COMPONENT_TYPES = [
 	{ value: 'brake_pads', label: 'Brake pads' },
 	{ value: 'fork_service', label: 'Fork service' },
 	{ value: 'rear_shock_service', label: 'Rear shock service' },
-	{ value: 'bottom_bracket', label: 'Bottom bracket' }
+	{ value: 'bottom_bracket', label: 'Bottom bracket' },
+	{ value: 'brake_bleed', label: 'Brake bleed' }
 ] as const;
 
 export type ComponentType = (typeof COMPONENT_TYPES)[number]['value'];

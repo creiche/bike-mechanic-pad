@@ -91,6 +91,18 @@ interface BikeComponentSnapshotRow {
 	updated_at: string;
 }
 
+interface ServiceMenuItemSnapshotRow {
+	id: string;
+	category: string;
+	name: string;
+	default_price_cents: number;
+	item_type: string;
+	component_tag: string | null;
+	archived_at: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
 export interface DatabaseSnapshot {
 	version: number;
 	exported_at: string;
@@ -101,6 +113,8 @@ export interface DatabaseSnapshot {
 		work_order_items: WorkOrderItemSnapshotRow[];
 		// Absent in snapshots exported before schema v5.
 		bike_components?: BikeComponentSnapshotRow[];
+		// Absent in snapshots exported before schema v6; an absent list leaves the local menu untouched.
+		service_menu_items?: ServiceMenuItemSnapshotRow[];
 	};
 }
 
@@ -227,6 +241,10 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 		'SELECT * FROM bike_components ORDER BY created_at ASC, id ASC'
 	);
 
+	const serviceMenuItems = await selectRows<ServiceMenuItemSnapshotRow>(
+		'SELECT * FROM service_menu_items ORDER BY created_at ASC, id ASC'
+	);
+
 	return {
 		version,
 		exported_at: new Date().toISOString(),
@@ -235,7 +253,8 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 			bikes,
 			work_orders: workOrders,
 			work_order_items: workOrderItems,
-			bike_components: bikeComponents
+			bike_components: bikeComponents,
+			service_menu_items: serviceMenuItems
 		}
 	};
 }
@@ -340,6 +359,30 @@ export async function importSnapshot(
 					]
 				}
 			);
+		}
+
+		if (snapshot.data.service_menu_items) {
+			await connection.exec('DELETE FROM service_menu_items');
+			for (const item of snapshot.data.service_menu_items) {
+				await connection.exec(
+					`INSERT INTO service_menu_items
+					   (id, category, name, default_price_cents, item_type, component_tag, archived_at, created_at, updated_at)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+					{
+						bind: [
+							item.id,
+							item.category,
+							item.name,
+							item.default_price_cents,
+							item.item_type,
+							item.component_tag,
+							item.archived_at,
+							item.created_at,
+							item.updated_at
+						]
+					}
+				);
+			}
 		}
 
 		const tipRows = (await connection.exec('SELECT COALESCE(MAX(seq), 0) AS tip FROM sync_outbox', {
@@ -597,6 +640,44 @@ async function applyBikeComponent(connection: SqliteConnection, delta: OutboxEnt
 	);
 }
 
+// Last-write-wins on updated_at, so the newest edit (or archive) survives on every device.
+async function applyServiceMenuItem(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
+	if (delta.action === 'DELETE') {
+		await connection.exec('DELETE FROM service_menu_items WHERE id = ?', { bind: [delta.entity_id] });
+		return;
+	}
+
+	const payload = parsePayload(delta);
+	const id = requireString(payload, 'id');
+	const updatedAt = optionalString(payload, 'updated_at') ?? delta.created_at;
+
+	const existing = await selectOne<{ updated_at: string }>('SELECT updated_at FROM service_menu_items WHERE id = ?', [id]);
+	if (existing && existing.updated_at > updatedAt) return;
+
+	await connection.exec(
+		`INSERT INTO service_menu_items
+		   (id, category, name, default_price_cents, item_type, component_tag, archived_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   category = excluded.category, name = excluded.name, default_price_cents = excluded.default_price_cents,
+		   item_type = excluded.item_type, component_tag = excluded.component_tag,
+		   archived_at = excluded.archived_at, updated_at = excluded.updated_at`,
+		{
+			bind: [
+				id,
+				requireString(payload, 'category'),
+				requireString(payload, 'name'),
+				requireInteger(payload, 'default_price_cents'),
+				requireString(payload, 'item_type'),
+				optionalString(payload, 'component_tag'),
+				optionalString(payload, 'archived_at'),
+				optionalString(payload, 'created_at') ?? delta.created_at,
+				updatedAt
+			]
+		}
+	);
+}
+
 function applyDelta(connection: SqliteConnection, delta: OutboxEntry): Promise<void> {
 	if (delta.action !== 'INSERT' && delta.action !== 'UPDATE' && delta.action !== 'DELETE') {
 		throw new SyncProtocolError(`Unknown action "${delta.action}".`);
@@ -611,6 +692,8 @@ function applyDelta(connection: SqliteConnection, delta: OutboxEntry): Promise<v
 			return applyWorkOrder(connection, delta);
 		case 'bike_component':
 			return applyBikeComponent(connection, delta);
+		case 'service_menu_item':
+			return applyServiceMenuItem(connection, delta);
 		default:
 			throw new SyncProtocolError(`Unknown entity type "${delta.entity_type}"; update the app to sync it.`);
 	}
