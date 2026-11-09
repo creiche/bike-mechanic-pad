@@ -58,6 +58,10 @@ export class DropboxAuth {
 		this.now = config.now ?? Date.now;
 	}
 
+	get appKey(): string {
+		return this.config.appKey;
+	}
+
 	isConnected(): boolean {
 		return this.readTokens() !== null;
 	}

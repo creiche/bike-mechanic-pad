@@ -527,7 +527,8 @@ async function queueRestoredState(
       entity_type: entityType,
       entity_id: row.id,
       action: "UPDATE",
-      payload: row,
+      // The marker lets this copy undo older deletes (see deletedOnThisDevice, restoredOnThisDevice).
+      payload: { ...row, restored: true },
     });
 
   const items = new Map<string, unknown[]>();
@@ -967,13 +968,43 @@ function isForeignKeyError(error: unknown): boolean {
 // shortcut: only sees deletes still in the outbox (about 30 days), add tombstones if older ones matter.
 async function deletedOnThisDevice(delta: OutboxEntry): Promise<boolean> {
   if (delta.action === "DELETE") return false;
+  // A restored copy only loses to deletes made after the restore; "" matches every delete.
+  const madeSince = parsePayload(delta).restored === true ? delta.created_at : "";
   const row = await selectOne<{ found: number }>(
     `SELECT 1 AS found FROM sync_outbox
-		 WHERE entity_type = ? AND entity_id = ? AND action = 'DELETE'
+		 WHERE entity_type = ? AND entity_id = ? AND action = 'DELETE' AND created_at >= ?
 		 LIMIT 1`,
-    [delta.entity_type, delta.entity_id],
+    [delta.entity_type, delta.entity_id, madeSince],
   );
   return row !== null;
+}
+
+// A restore has to be able to undo a delete made on another device, so that device's older DELETE must not
+// remove this device's restored copy when the restore replays its history.
+// shortcut: a device with no restored copy of its own (a brand-new tablet) can still apply the delete last, add tombstones if that matters.
+async function restoredOnThisDevice(delta: OutboxEntry): Promise<boolean> {
+  if (delta.action !== "DELETE") return false;
+  const row = await selectOne<{ found: number }>(
+    `SELECT 1 AS found FROM sync_outbox
+		 WHERE entity_type = ? AND entity_id = ? AND action != 'DELETE' AND created_at > ?
+		   AND json_extract(payload, '$.restored') = 1
+		 LIMIT 1`,
+    [delta.entity_type, delta.entity_id, delta.created_at],
+  );
+  return row !== null;
+}
+
+// Once a restored copy lands, older local deletes no longer apply: without this, later edits to it would be ignored.
+async function forgetDeletesBeforeRestore(
+  connection: SqliteConnection,
+  delta: OutboxEntry,
+): Promise<void> {
+  if (delta.action === "DELETE" || parsePayload(delta).restored !== true) return;
+  await connection.exec(
+    `DELETE FROM sync_outbox
+		 WHERE entity_type = ? AND entity_id = ? AND action = 'DELETE' AND created_at < ?`,
+    { bind: [delta.entity_type, delta.entity_id, delta.created_at] },
+  );
 }
 
 // Apply a remote device's deltas and advance its pull cursor in ONE transaction, so a crash can never
@@ -999,7 +1030,7 @@ export async function applyRemoteDeltas(
       if (delta.seq <= cursor) continue;
 
       // Counted as applied, like a change that loses last-write-wins: the stream moved forward.
-      if (await deletedOnThisDevice(delta)) {
+      if ((await deletedOnThisDevice(delta)) || (await restoredOnThisDevice(delta))) {
         applied++;
         cursor = delta.seq;
         continue;
@@ -1008,6 +1039,7 @@ export async function applyRemoteDeltas(
       await connection.exec("SAVEPOINT remote_delta");
       try {
         await applyDelta(connection, delta);
+        await forgetDeletesBeforeRestore(connection, delta);
         await connection.exec("RELEASE remote_delta");
         applied++;
         cursor = delta.seq;

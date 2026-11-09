@@ -192,5 +192,13 @@ ALTER TABLE bikes ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:
 UPDATE customers SET updated_at = created_at;
 UPDATE bikes SET updated_at = created_at;
 `
+  },
+  {
+    version: 8,
+    name: 'restore outbox entity index',
+    sql: `
+-- Migration 4 rebuilt sync_outbox and lost this index; sync looks up a record's outbox rows for every incoming change.
+CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity ON sync_outbox(entity_type, entity_id);
+`
   }
 ];

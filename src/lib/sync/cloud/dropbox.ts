@@ -29,7 +29,8 @@ function joinPath(folderPath: string, name?: string): string {
 }
 
 export class DropboxAdapter implements CloudStorageAdapter {
-	readonly id = 'dropbox';
+	// Each app key has its own empty app folder, so upload progress must not carry over between keys.
+	readonly id: string;
 	readonly displayName = 'Dropbox';
 	private readonly fetchImpl: FetchLike;
 	private readonly timeoutMs: number;
@@ -38,6 +39,7 @@ export class DropboxAdapter implements CloudStorageAdapter {
 		private readonly auth: DropboxAuth,
 		options: DropboxAdapterOptions = {}
 	) {
+		this.id = `dropbox:${auth.appKey}`;
 		this.fetchImpl = options.fetch ?? ((input, init) => fetch(input, init));
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 	}

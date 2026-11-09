@@ -452,6 +452,51 @@ describe('applyRemoteDeltas', () => {
 		expect(queryRows('SELECT name FROM customers')).toEqual([{ name: 'Ana' }]);
 	});
 
+	const restoredCopy = (createdAt: string) => ({
+		...remote(2, 'customer', 'UPDATE', 'c1', { id: 'c1', name: 'Ana', restored: true }),
+		created_at: createdAt
+	});
+	const remoteDelete = (seq: number, id: string, createdAt: string) => ({
+		...remote(seq, 'customer', 'DELETE', id, { id }),
+		created_at: createdAt
+	});
+	const localDeletes = () => queryRows("SELECT entity_id FROM sync_outbox WHERE action = 'DELETE'");
+
+	it('lets a restored copy from another device undo an older delete made here', async () => {
+		const peer = pullPeerId('dev-b');
+		await applyRemoteDeltas(peer, 'B', [remote(1, 'customer', 'INSERT', 'c1', { id: 'c1', name: 'Ana' })]);
+		await deleteCustomer('c1');
+
+		await applyRemoteDeltas(peer, 'B', [restoredCopy('2999-01-01T00:00:00.000Z')]);
+
+		expect(queryRows('SELECT id FROM customers')).toEqual([{ id: 'c1' }]);
+		expect(localDeletes()).toEqual([]);
+	});
+
+	it('keeps a delete made here after the restored copy', async () => {
+		const peer = pullPeerId('dev-b');
+		await applyRemoteDeltas(peer, 'B', [remote(1, 'customer', 'INSERT', 'c1', { id: 'c1', name: 'Ana' })]);
+		await deleteCustomer('c1');
+
+		await applyRemoteDeltas(peer, 'B', [restoredCopy('2020-01-01T00:00:00.000Z')]);
+
+		expect(queryRows('SELECT id FROM customers')).toEqual([]);
+		expect(localDeletes()).toEqual([{ entity_id: 'c1' }]);
+	});
+
+	it('keeps a restored record when another device history holds an older delete, but not a newer one', async () => {
+		const customer = await createCustomer({ name: 'Ana' });
+		const backup = JSON.parse(JSON.stringify(await exportSnapshot())) as DatabaseSnapshot;
+		await importSnapshot(backup, pullPeerId('dev-self'), 'Self');
+		const peer = pullPeerId('dev-b');
+
+		await applyRemoteDeltas(peer, 'B', [remoteDelete(1, customer.id, '2020-01-01T00:00:00.000Z')]);
+		expect(queryRows('SELECT id FROM customers')).toEqual([{ id: customer.id }]);
+
+		await applyRemoteDeltas(peer, 'B', [remoteDelete(2, customer.id, '2999-01-01T00:00:00.000Z')]);
+		expect(queryRows('SELECT id FROM customers')).toEqual([]);
+	});
+
 	it('queues restored rows, parents first, so another device can rebuild from them', async () => {
 		const customer = await createCustomer({ name: 'Ana' });
 		const bike = await createBike({ customer_id: customer.id, brand: 'Trek', model: 'Domane' });

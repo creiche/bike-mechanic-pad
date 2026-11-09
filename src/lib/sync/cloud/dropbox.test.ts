@@ -31,6 +31,10 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
 	new Response(JSON.stringify(body), { status, headers });
 
 describe('DropboxAdapter', () => {
+	it('has an id per app key, so a new key does not inherit upload progress', () => {
+		expect(setup(vi.fn() as unknown as typeof fetch).adapter.id).toBe('dropbox:app-key');
+	});
+
 	it('uploads with add mode and the bearer token', async () => {
 		const fetchMock = vi.fn(async () => json({}));
 		const { adapter } = setup(fetchMock as unknown as typeof fetch);
