@@ -459,4 +459,16 @@ describe('packets', () => {
 
 		expect(() => parsePacket(JSON.stringify(packet), { ...peer, startSeq: 1, endSeq: 1 })).toThrow('malformed');
 	});
+
+	it('rejects empty, duplicate, unordered or bound-missing deltas, but allows gaps', () => {
+		const ref = { ...peer, startSeq: 1, endSeq: 3 };
+		const base = buildPacket(peer, [delta(1), delta(3)]);
+		for (const deltas of [[], [delta(1), delta(1), delta(3)], [delta(3), delta(1)], [delta(1), delta(2)]]) {
+			expect(() => parsePacket(JSON.stringify({ ...base, deltas }), ref)).toThrow('malformed');
+		}
+		// A delta silently dropped from the middle no longer matches the recorded count.
+		const full = buildPacket(peer, [delta(1), delta(2), delta(3)]);
+		expect(() => parsePacket(JSON.stringify({ ...full, deltas: [delta(1), delta(3)] }), ref)).toThrow('malformed');
+		expect(parsePacket(JSON.stringify(base), ref).deltas).toHaveLength(2);
+	});
 });

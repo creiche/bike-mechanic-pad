@@ -81,6 +81,7 @@ describe('validateSnapshot', () => {
 		['missing table', (s) => delete s.data.bikes, /"bikes"/],
 		['float cents', (s) => (s.data.work_order_items[0].unit_price_cents = 35.5), /whole cents/],
 		['bad status', (s) => (s.data.work_orders[0].status = 'weird'), /status/],
+		['total not matching items', (s) => (s.data.work_orders[0].total_cents += 1), /does not match its items/],
 		['orphan bike', (s) => (s.data.bikes[0].customer_id = 'nope'), /missing customers/],
 		['duplicate id', (s) => s.data.customers.push({ ...s.data.customers[0] }), /repeats id/],
 		['bad ledger date', (s) => (s.data.bike_components[0].last_serviced_date = '2026-13-40'), /YYYY-MM-DD/],

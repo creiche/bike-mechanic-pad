@@ -585,6 +585,16 @@ export function deletePeerState(peerId: string): Promise<void> {
   });
 }
 
+// Pull cursors are seq positions inside one folder's packets. When the relay changes (new folder or Dropbox app key)
+// they mean nothing there, so forget them all and replay the new folder from the start (last-write-wins keeps it safe).
+export function resetPullCursors(): Promise<void> {
+  return inTransaction(async (connection) => {
+    await connection.exec("DELETE FROM peer_sync_state WHERE peer_id LIKE ?", {
+      bind: [`${PULL_PEER_PREFIX}%`],
+    });
+  });
+}
+
 export interface ApplyRemoteResult {
   applied: number;
   // Set when a delta pointed at a parent row that has not arrived yet. Processing stopped there and the

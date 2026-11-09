@@ -53,6 +53,27 @@ describe('SyncController', () => {
 		expect(controller.getIdentity().deviceName).toBe('Stand iPad');
 	});
 
+	it('resets pull cursors only when the folder or app key changes after setup', async () => {
+		const reset = vi.fn(async () => {});
+		const controller = (active = new SyncController({
+			redirectUri: () => 'https://app.example/settings',
+			storage: memoryStorage(),
+			sessionStorage: memoryStorage(),
+			fetch: fetchMock as unknown as typeof fetch,
+			resetPullCursors: reset
+		}));
+		controller.init();
+
+		await controller.saveSettings(input); // first-time setup
+		await controller.saveSettings({ ...input, deviceName: 'Renamed' }); // same relay
+		expect(reset).not.toHaveBeenCalled();
+
+		await controller.saveSettings({ ...input, folderPath: 'Other' });
+		expect(reset).toHaveBeenCalledTimes(1);
+		await controller.saveSettings({ ...input, folderPath: 'Other', appKey: 'key-2' });
+		expect(reset).toHaveBeenCalledTimes(2);
+	});
+
 	it('rejects an invalid device name or folder without changing settings', async () => {
 		const controller = (active = setup());
 		await expect(controller.saveSettings({ ...input, deviceName: ' ' })).rejects.toThrow();

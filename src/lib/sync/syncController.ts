@@ -1,9 +1,10 @@
+import { resetPullCursors } from '../db/repositories/sync';
 import { DropboxAdapter } from './cloud/dropbox';
 import { DropboxAuth, type KeyValueStorage } from './cloud/dropboxAuth';
 import type { FetchLike } from './cloud/http';
 import { loadDeviceIdentity, saveDeviceName, type DeviceIdentity } from './device';
 import { loadSyncSettings, saveSyncSettings, type SyncSettings } from './settings';
-import { SyncService, type SyncState } from './syncService';
+import { LOCK_NAME, SyncService, type SyncState } from './syncService';
 
 // 'unconfigured' = no app key yet; 'disconnected' = app key saved but Dropbox not authorized.
 export type ConnectionStatus = 'unconfigured' | 'disconnected' | 'connected';
@@ -18,6 +19,8 @@ export interface SyncControllerOptions {
 	storage?: KeyValueStorage;
 	sessionStorage?: KeyValueStorage;
 	fetch?: FetchLike;
+	// Test seam; defaults to the real repository.
+	resetPullCursors?: () => Promise<void>;
 }
 
 export interface SyncSettingsInput extends SyncSettings {
@@ -72,8 +75,23 @@ export class SyncController {
 
 		// Tokens belong to one Dropbox app; they are useless (and a refresh would fail) under another key.
 		if (next.appKey !== this.settings.appKey) await this.auth?.disconnect();
+		// First-time setup has no earlier folder whose cursors could be stale.
+		const relayChanged =
+			this.settings.appKey !== '' &&
+			(next.appKey !== this.settings.appKey || next.folderPath !== this.settings.folderPath);
 		this.settings = next;
-		this.rebuild();
+		this.service?.stop();
+		try {
+			if (relayChanged) {
+				// Pull cursors belong to the old folder's packets. Wait for a running cycle (same lock as sync, restore and
+				// clear) so it cannot write an old-folder cursor after the reset.
+				const locks = globalThis.navigator?.locks;
+				const reset = this.options.resetPullCursors ?? resetPullCursors;
+				await (locks ? locks.request(LOCK_NAME, reset) : reset());
+			}
+		} finally {
+			this.rebuild(); // always restart sync, even if the reset failed (the error still reaches the caller)
+		}
 	}
 
 	// Step 1 of sign-in: returns the Dropbox URL the page should navigate to.

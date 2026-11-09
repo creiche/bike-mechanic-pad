@@ -137,6 +137,20 @@ export function validateSnapshot(input: unknown): DatabaseSnapshot {
 		}
 	}
 
+	// Each work order total must equal the sum of quantity * unit price of its items (integer cents).
+	const itemTotals = new Map<string, number>();
+	for (const item of tables.work_order_items ?? []) {
+		if (typeof item.work_order_id !== 'string') continue;
+		const line = Number(item.quantity) * Number(item.unit_price_cents);
+		itemTotals.set(item.work_order_id, (itemTotals.get(item.work_order_id) ?? 0) + line);
+	}
+	for (const order of tables.work_orders ?? []) {
+		const expected = itemTotals.get(order.id as string) ?? 0;
+		if (isNonNegativeInt(order.total_cents) && order.total_cents !== expected) {
+			fail(`work_orders row ${String(order.id)} total_cents (${order.total_cents}) does not match its items (${expected}).`);
+		}
+	}
+
 	if (problems.length > 0) throw new SnapshotValidationError(problems);
 	return input as unknown as DatabaseSnapshot;
 }

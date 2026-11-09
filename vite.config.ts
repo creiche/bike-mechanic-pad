@@ -32,7 +32,8 @@ export default defineConfig({
 			},
 
 			// Set BASE_PATH=/repo-name when hosted under a sub-path (GitHub Pages project site).
-			paths: { base: (process.env.BASE_PATH ?? '') as '' | `/${string}` },
+			// relative:false = absolute asset URLs, so the cached shell works when served at any deep link.
+			paths: { base: (process.env.BASE_PATH ?? '') as '' | `/${string}`, relative: false },
 
 			// Static single-page app: no server, so the same build runs from a static host, as a PWA, or inside Tauri.
 			// Unknown paths fall back to index.html and the client router takes over.

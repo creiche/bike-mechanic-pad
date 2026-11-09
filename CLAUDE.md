@@ -8,6 +8,7 @@
 - **Framework:** SvelteKit (TypeScript) with Tailwind CSS.
 - **Database:** Local SQLite running inside `@sqlite.org/sqlite-wasm` with OPFS (Origin Private File System) persistence.
 - **Local-First ID Standard:** ALWAYS use `id TEXT PRIMARY KEY` across all tables. IDs must be generated client-side using Web Crypto (`crypto.randomUUID()`). Do NOT use auto-incrementing `INTEGER PRIMARY KEY`.
+  - **Sole exception:** `sync_outbox.seq INTEGER PRIMARY KEY AUTOINCREMENT`. It is a device-local, gap-tolerant ordering cursor for the sync protocol (push/pull cursors compare `seq`), which random UUIDs cannot provide. The row's identity is still the client-generated `id TEXT UNIQUE NOT NULL`; `seq` is never an entity key, never sent as one, and never used in foreign keys. Any other table needing a counter must justify it here first.
 - **Data Integrity:** Store all currency amounts as **integers in cents** (`unit_price_cents`, `total_cents`). NEVER use floating-point numbers for money calculations or storage.
 - **Foreign Keys & Naming:** Always enable `PRAGMA foreign_keys = ON;` and use `ON DELETE CASCADE` for customer -> bike -> work order relationships. Use `brand` (not `make`) for bike models.
 - **Repository Pattern & Sync:** All database writes MUST go through repository transactions and explicitly call `notifyLocalWrite()`. Outbox entities must maintain last-write-wins per record and be fully supported in snapshot export/import.

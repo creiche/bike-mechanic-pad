@@ -11,6 +11,8 @@ export interface SyncPacket {
 	deviceName: string;
 	startSeq: number;
 	endSeq: number;
+	// Number of deltas written; catches a dropped middle delta, which a seq-range check cannot (restores leave legit gaps).
+	count: number;
 	deltas: OutboxEntry[];
 }
 
@@ -43,6 +45,7 @@ export function buildPacket(identity: DeviceIdentity, deltas: OutboxEntry[]): Sy
 		deviceName: identity.deviceName,
 		startSeq: deltas[0].seq,
 		endSeq: deltas[deltas.length - 1].seq,
+		count: deltas.length,
 		deltas
 	};
 }
@@ -58,6 +61,18 @@ function isDelta(value: unknown): value is OutboxEntry {
 		typeof row.action === 'string' &&
 		typeof row.payload === 'string' &&
 		typeof row.created_at === 'string'
+	);
+}
+
+// buildPacket() makes the first and last seq equal the file-name bounds, so a packet must be non-empty, strictly
+// increasing (no duplicates) and touch both bounds. Not required to be gap-free: restoring a backup deletes
+// superseded DELETE rows from the middle of the outbox, so legitimate packets can skip seqs.
+function isOrderedWithinBounds(deltas: OutboxEntry[], { startSeq, endSeq }: PacketRef): boolean {
+	return (
+		deltas.length > 0 &&
+		deltas[0].seq === startSeq &&
+		deltas[deltas.length - 1].seq === endSeq &&
+		deltas.every((delta, i) => i === 0 || delta.seq > deltas[i - 1].seq)
 	);
 }
 
@@ -83,8 +98,9 @@ export function parsePacket(text: string, expected: PacketRef): SyncPacket {
 		packet.endSeq !== expected.endSeq ||
 		typeof packet.deviceName !== 'string' ||
 		!Array.isArray(packet.deltas) ||
+		packet.count !== packet.deltas.length ||
 		!packet.deltas.every(isDelta) ||
-		packet.deltas.some((delta) => delta.seq < expected.startSeq || delta.seq > expected.endSeq)
+		!isOrderedWithinBounds(packet.deltas, expected)
 	) {
 		throw new SyncProtocolError(`Packet ${packetFileName(expected)} does not match its file name or is malformed.`);
 	}

@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS peer_sync_state (
 );
 
 CREATE TABLE IF NOT EXISTS sync_outbox_v4_new (
+  -- Sole documented exception to "id TEXT PRIMARY KEY" (see CLAUDE.md): seq is this device's monotonic sync cursor.
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   id TEXT UNIQUE NOT NULL,
   entity_type TEXT NOT NULL,

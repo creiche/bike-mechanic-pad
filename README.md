@@ -14,6 +14,10 @@ The project is small and self-supported. It is provided as-is, with no paid supp
 
 The app is designed as a lightweight clipboard, not a full shop-management or accounting system. It does not replace professional bookkeeping, payment processing, inventory control, customer communication, or a tested backup process.
 
+## Offline Use
+
+Open the app once with a network connection. A service worker (`src/service-worker.ts`) then caches the whole app, and it works offline from the next load on. The same worker adds the COOP/COEP headers that browser storage (OPFS) needs on hosts that cannot send them. A web manifest lets you install it to a tablet home screen.
+
 ## Getting Started
 
 The app is a Progressive Web App. Open it in a supported browser; install it to a device's home screen if you want an app-like shortcut. The database is local to the browser profile until you configure sync.
