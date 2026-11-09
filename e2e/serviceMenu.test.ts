@@ -1,7 +1,6 @@
 import { expect, test } from '@playwright/test';
 
 test('quick-add from the service menu, override the price, and a new menu item appears', async ({ page }) => {
-	test.setTimeout(60_000); // the dev server compiles the new routes on first visit
 	await page.goto('/settings/services');
 	await page.getByLabel('Service name').fill('Wheel True');
 	await page.getByLabel('Default price ($)').fill('25.00');

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import favicon from '#lib/assets/favicon.svg';
 	import { resolve } from '$app/paths';
+	import StorageStatus from '../lib/components/StorageStatus.svelte';
 	import SyncStatusPill from '../lib/components/SyncStatusPill.svelte';
 	import { syncService } from '../lib/sync/runtime';
 	import '../app.css';
@@ -23,7 +24,10 @@
 		<a href={resolve('/customers')} class="flex min-h-12 items-center rounded-md px-3 hover:bg-neutral-800 hover:text-white">Customers</a>
 		<a href={resolve('/settings')} class="flex min-h-12 items-center rounded-md px-3 hover:bg-neutral-800 hover:text-white">Settings</a>
 	</nav>
-	<a href={resolve('/settings')} aria-label="Sync settings"><SyncStatusPill /></a>
+	<div class="flex items-center gap-4">
+		<StorageStatus />
+		<a href={resolve('/settings')} aria-label="Sync settings"><SyncStatusPill /></a>
+	</div>
 </header>
 
 {@render children()}

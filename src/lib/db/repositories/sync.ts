@@ -115,6 +115,8 @@ export interface DatabaseSnapshot {
 		bike_components?: BikeComponentSnapshotRow[];
 		// Absent in snapshots exported before schema v6; an absent list leaves the local menu untouched.
 		service_menu_items?: ServiceMenuItemSnapshotRow[];
+		// Informational copy of the sync outbox at export time; restore does not replay it.
+		outbox?: OutboxEntry[];
 	};
 }
 
@@ -245,6 +247,8 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 		'SELECT * FROM service_menu_items ORDER BY created_at ASC, id ASC'
 	);
 
+	const outbox = await selectRows<OutboxEntry>('SELECT * FROM sync_outbox ORDER BY seq ASC');
+
 	return {
 		version,
 		exported_at: new Date().toISOString(),
@@ -254,7 +258,8 @@ export async function exportSnapshot(): Promise<DatabaseSnapshot> {
 			work_orders: workOrders,
 			work_order_items: workOrderItems,
 			bike_components: bikeComponents,
-			service_menu_items: serviceMenuItems
+			service_menu_items: serviceMenuItems,
+			outbox
 		}
 	};
 }
