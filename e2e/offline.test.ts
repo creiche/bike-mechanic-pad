@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test('after one online visit the app reloads and works with no network', async ({ page, context }) => {
 	await page.goto('/customers');
@@ -6,6 +6,14 @@ test('after one online visit the app reloads and works with no network', async (
 	await page.evaluate(() => navigator.serviceWorker.ready);
 	await page.reload();
 	await expect.poll(() => page.evaluate(() => !!navigator.serviceWorker.controller)).toBe(true);
+
+	// The browser's HTTP cache would hide a missing file here, so check the precache directly.
+	const precached = await page.evaluate(async () => {
+		const cache = await caches.open((await caches.keys())[0]);
+		return (await cache.keys()).map((request) => request.url);
+	});
+	expect(precached.join('\n')).toMatch(/sqlite3-[^/]*\.wasm/);
+	expect(precached.join('\n')).toMatch(/sqlite3-opfs-async-proxy/);
 
 	await context.setOffline(true);
 	await page.reload(); // HTML + JS + WASM must all come from the cache

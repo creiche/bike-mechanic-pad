@@ -4,6 +4,7 @@
 /// <reference lib="webworker" />
 import { version } from '$app/env';
 import { immutable, assets } from '$app/manifest';
+import { filesLoadedByWorker } from './lib/offline/workerFiles';
 
 // The ONE service worker for the app. It does two jobs:
 //  1. Offline: precache the whole app shell (HTML, JS, CSS, WASM) so reloads work with no network.
@@ -33,10 +34,17 @@ function isolated(res: Response): Response {
 
 sw.addEventListener('install', (event) => {
 	event.waitUntil(
-		caches
-			.open(CACHE)
-			.then((cache) => cache.addAll(ASSETS))
-			.then(() => sw.skipWaiting())
+		(async () => {
+			const cache = await caches.open(CACHE);
+			await cache.addAll(ASSETS);
+			// The manifest lists the database worker but not sqlite's wasm and OPFS proxy, which only that worker's code names.
+			const workers = ASSETS.filter((path) => /\/workers\/[^/]+\.js$/.test(path));
+			const files = await Promise.all(
+				workers.map(async (path) => filesLoadedByWorker(await (await cache.match(path))!.text(), new URL(path, sw.location.href).href))
+			);
+			await cache.addAll([...new Set(files.flat())]);
+			await sw.skipWaiting();
+		})()
 	);
 });
 
@@ -52,7 +60,7 @@ sw.addEventListener('activate', (event) => {
 sw.addEventListener('fetch', (event) => {
 	const { request } = event;
 	const url = new URL(request.url);
-	// Only our own GETs. Cross-origin calls (Dropbox sync) go straight to the network.
+	// Only our own GETs. Cross-origin calls (WebDAV sync) go straight to the network.
 	if (request.method !== 'GET' || url.origin !== sw.location.origin) return;
 
 	event.respondWith(

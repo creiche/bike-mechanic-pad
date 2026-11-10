@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test('work order flow: totals in cents, completion stamps the bike ledger, dashboard filters by status', async ({ page }) => {
 	await page.goto('/customers');

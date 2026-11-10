@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test('quick-add from the service menu, override the price, and a new menu item appears', async ({ page }) => {
 	await page.goto('/settings/services');

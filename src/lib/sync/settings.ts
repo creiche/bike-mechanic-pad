@@ -1,11 +1,17 @@
-// User-editable sync configuration, kept in localStorage next to the device identity and OAuth tokens.
+import { normalizeWebDavUrl, validateWebDavUsername } from './cloud/webdav';
+
+// User-editable sync configuration, kept in localStorage next to the device identity.
+// shortcut: the password is stored unencrypted because an encrypted one would need a passphrase at every launch; use the Credential Management API if browsers ever allow it for WebDAV.
 export interface SyncSettings {
-	// Dropbox "App key" (OAuth client id). Public by design under PKCE.
-	appKey: string;
-	// Folder inside the Dropbox app folder that holds this shop's packets.
+	// Empty until the user sets up WebDAV.
+	webdavUrl: string;
+	username: string;
+	password: string;
+	// Folder under the WebDAV address that holds this shop's packets.
 	folderPath: string;
 }
 
+export type KeyValueStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 type SettingsStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 export const DEFAULT_FOLDER_PATH = '/BikeMechanicPadSync';
@@ -21,28 +27,40 @@ export function normalizeFolderPath(input: string): string {
 	return `/${trimmed}`;
 }
 
+function normalizeSettings(settings: SyncSettings): SyncSettings {
+	const username = settings.username.trim();
+	validateWebDavUsername(username);
+	return {
+		webdavUrl: settings.webdavUrl.trim() ? normalizeWebDavUrl(settings.webdavUrl) : '',
+		username,
+		password: settings.password, // never trimmed: spaces can be part of a password
+		folderPath: normalizeFolderPath(settings.folderPath)
+	};
+}
+
+const DEFAULTS: SyncSettings = { webdavUrl: '', username: '', password: '', folderPath: DEFAULT_FOLDER_PATH };
+
 export function loadSyncSettings(storage: SettingsStorage = localStorage): SyncSettings {
-	const defaults: SyncSettings = { appKey: '', folderPath: DEFAULT_FOLDER_PATH };
 	const raw = storage.getItem(SETTINGS_KEY);
-	if (!raw) return defaults;
+	if (!raw) return DEFAULTS;
 
 	try {
 		const parsed = JSON.parse(raw) as Partial<SyncSettings>;
-		return {
-			appKey: typeof parsed.appKey === 'string' ? parsed.appKey.trim() : '',
-			folderPath: typeof parsed.folderPath === 'string' ? normalizeFolderPath(parsed.folderPath) : DEFAULT_FOLDER_PATH
-		};
+		const text = (value: unknown) => (typeof value === 'string' ? value : '');
+		return normalizeSettings({
+			webdavUrl: text(parsed.webdavUrl),
+			username: text(parsed.username),
+			password: text(parsed.password),
+			folderPath: text(parsed.folderPath)
+		});
 	} catch {
-		return defaults; // corrupted entry: start clean rather than block the app
+		return DEFAULTS; // corrupted entry: start clean rather than block the app
 	}
 }
 
 // Validates and persists; returns the normalized settings that were stored.
 export function saveSyncSettings(settings: SyncSettings, storage: SettingsStorage = localStorage): SyncSettings {
-	const normalized: SyncSettings = {
-		appKey: settings.appKey.trim(),
-		folderPath: normalizeFolderPath(settings.folderPath)
-	};
+	const normalized = normalizeSettings(settings);
 	storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
 	return normalized;
 }

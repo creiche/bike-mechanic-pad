@@ -10,7 +10,7 @@
 
 ### Core Product Principles:
 - **Local-First & Offline-First:** All customer, bike, and work order data lives on the user's device inside an SQLite database in OPFS (Origin Private File System). It requires zero internet connection to function.
-- **Serverless Multi-Device Sync:** Mechanics can seamlessly switch between an iPhone on the shop floor, an iPad on the repair stand, and a desktop in the office throughout the day using standard consumer cloud storage (Dropbox, Google Drive, OneDrive) or private object storage (S3/R2/WebDAV) as a dumb drop-off relay.
+- **Serverless Multi-Device Sync:** Mechanics can seamlessly switch between an iPhone on the shop floor, an iPad on the repair stand, and a desktop in the office throughout the day, over a direct local WebRTC link or a self-hosted WebDAV server used as a dumb drop-off relay.
 - **Instant Master Takeover:** Any single device can act as the authoritative state or take over as master. Full database export/import options guarantee total data ownership and instant recovery if a tablet physically breaks.
 - **Cross-Platform Delivery:** Runs natively as a Progressive Web App (PWA) across iOS, Android, Windows, Linux, and macOS.
 
@@ -148,70 +148,28 @@ Cross-Origin-Embedder-Policy: require-corp
 ### 1. The Append-Only Outbox & Peer Watermark Pattern
 All database mutations inside repository functions wrap the domain write and outbox entry in a single atomic `BEGIN IMMEDIATE` SQLite transaction. Instead of a destructive queue, `sync_outbox` acts as an append-only transaction ledger tracked via an auto-incrementing `seq` column. Multi-peer state is tracked via `peer_sync_state`, allowing peers to pull incremental deltas independently (`seq > last_synced_seq`) without premature record deletion.
 
-### 2. Bring Your Own Storage (BYOS) Sync Layer
-Mechanics do not configure complex server infrastructure or cloud databases. Instead, they authenticate via client-side OAuth (PKCE) in the settings UI to grant access to a single app folder in their personal cloud storage:
-- **Supported Providers:** Dropbox, Google Drive, Microsoft OneDrive, or private S3/Cloudflare R2 buckets / WebDAV.
-- **Background Sync Protocol:**
-- **Push:** When changes exist in `sync_outbox`, the app writes encrypted JSON delta packets to the connected cloud folder via standard REST APIs (`fetch()`).
-- **Pull:** When opening the app or regaining network access, the app lists pending outbox deltas from other devices, applies them to local SQLite using sequence tracking and watermark acknowledgments.
+### 2. Decentralized Dual-Transport Model
+To maintain strict data sovereignty, zero server costs, and zero reliance on proprietary corporate API keys (like Dropbox or Google Drive), `bike-mechanic-pad` uses a two-tier decentralized sync architecture:
 
-### 2.1 Transport Strategy (Current vs Future)
-`bike-mechanic-pad` uses one sync transport in the current product scope.
+- **Primary Default Transport (Local P2P WebRTC):** For day-to-day shop floor use when devices (e.g., a tablet on the stand and a mechanic's phone) are on the same local network. It establishes a direct, encrypted P2P DataChannel with zero cloud infrastructure.
+- **Advanced / Remote Transport (Open-Standard WebDAV):** For mechanics who need to sync out-of-shop or wish to connect to a self-hosted cloud (Nextcloud, personal NAS, etc.) via standard RFC 4918 protocols.
 
-- **Current (implemented and preferred):** BYOS cloud relay.
-- **No BYOS configured:** continue local-first operation, keep writing mutations to `sync_outbox`, and sync once BYOS is connected.
-- **Future/optional:** direct **P2P WebRTC** transport may be added later as an advanced fallback, but it is not part of the current runtime sync path.
+### 2.1 P2P Pairing & Trust Model (WebRTC Default)
+Because WebRTC requires an initial connection handshake without a central server, pairing follows an explicit zero-config workflow:
+- **Two-Scan QR Handshake:** The first device shows an offer as a QR code; the second scans it and shows a reply; the first scans that. Each code holds only the ICE credentials, DTLS fingerprint, and host candidates, and the other side rebuilds the SDP from them. Because the fingerprint travels by camera, a scan authenticates the device on the other end.
+- **Persistent Trust:** Each device keeps one `RTCCertificate` in IndexedDB so its DTLS fingerprint is stable. A QR pairing saves the other device's fingerprint in `peer_sync_state.dtls_fingerprint`, on that device's push-cursor row, and only a QR pairing can create or change it. Trust is device-local: it is never exported or synced. Certificates are capped at one year by browsers, after which devices pair by QR again.
+- **Mesh Recovery:** With no signalling server, a device that lost all its links needs one QR pairing with any linked device. Linked devices tell each other who else they are linked to, and pass handshakes between remembered devices over those links; the lower device id offers. The device in the middle is only a courier: each end rejects a handshake whose fingerprint differs from the one it saved. Links, not trust, are lost on reload.
+- **Pull-Only Exchange:** Each device serves its outbox as a virtual folder of packets, and the other pulls them in its normal sync cycle. A pull request carries the requester's cursor, which is its durable ACK. Neither side waits on the other's sync lock, so simultaneous syncs cannot deadlock.
+- **No Forwarding:** Applied rows are not re-added to the outbox, so a device only serves changes it authored. A child record whose parent may still be on a third device stalls rather than being dropped.
 
-Transport additions must never change domain write behavior or outbox event shape.
-
-### 2.2 P2P Pairing and Trust Model (Future State)
-If P2P is introduced later, it must use explicit pairing and a user-approved trust relationship.
-
-- **Pairing:** explicit offer/answer exchange (for example QR code or copy/paste token), not implicit LAN auto-discovery.
-- **Trust:** peers are allow-listed before accepting deltas.
-- **Channel security:** use WebRTC encrypted data channels and verify remote peer identity against the trusted peer list.
+### 2.2 WebDAV Client Transport (Remote / Advanced)
+For out-of-shop use, users can configure a WebDAV URL, username, and password in settings. The app pushes and pulls serialized JSON outbox deltas directly to their private server without any third-party app gating or developer keys.
 
 ### 2.3 Conflict and Recovery Rules
-BYOS is the current transport baseline. Any future transport (including P2P) must follow the same conflict and recovery behavior.
+- **Conflict Policy:** Shared deterministic last-write-wins per entity record based on timestamp metadata.
+- **Bootstrap:** New or stale peers use full snapshot export/import (`exportSnapshot` / `importSnapshot`) when outbox log replay exceeds the retention window.
+- **Retention:** Outbox pruning remains watermark-driven (`seq <= MIN(last_synced_seq)`) and bounded by a maximum time window (e.g., 30 days).
 
-- **Conflict policy:** shared deterministic policy across transports (for example last-write-wins by trusted timestamp/version metadata).
-- **Bootstrap:** new or stale peers use snapshot bootstrap (`exportSnapshot` / `importSnapshot`) when outbox replay is insufficient.
-- **Retention:** outbox pruning remains watermark-driven and retention-bounded, independent of transport choice.
-
-### 2.4 Delivery Status
-Current implementation focus is the database/repository layer (`sync_outbox`, peer cursors, pruning, snapshots).
-
-- **Implemented now:** append-only outbox + peer cursor model in SQLite.
-- **Also implemented:** BYOS transport (`src/lib/sync/`): `CloudStorageAdapter` interface, Dropbox adapter with OAuth PKCE, and `SyncService` (push, pull, prune; status `idle | syncing | offline | error`; polling, debounce, backoff). Push cursors are `relay:<provider>:<folder>` rows and pull cursors are `pull:<deviceId>` rows in `peer_sync_state`; pruning ignores pull cursors. Remote deltas are applied with `applyRemoteDeltas()` (one transaction, cursor included, no outbox echo). Customer and bike mutations are now written to the outbox too.
-- **Also implemented:** settings UI (`/settings`): Dropbox app key, sync folder (default `/BikeMechanicPadSync`), device name/id, OAuth PKCE connect/disconnect, "Sync Now", and a live status pill in the app header. `SyncController` (`src/lib/sync/syncController.ts`, exported as `syncService` from `runtime.ts`) owns the active `SyncService` and is the store the UI reads as `$syncService`. The redirect URI to register in the Dropbox console is `<origin>/settings`.
-- **Also implemented:** core domain views. `/` is the work order dashboard (status filter chips with counts, cards with customer/bike/summary/total); `/work-orders/new` and `/work-orders/[id]` create and edit orders (labor/part line items, integer-cent math in `src/lib/domain/money.ts`, status changes; items lock once completed or cancelled). `/customers` manages customers and bikes (create/edit/delete) and shows the per-bike component ledger (`BikeLedger.svelte`). Moving an order into `completed` stamps `bike_components` for every tagged line item inside the same transaction as the status change; `bike_component` is a synced outbox entity (last-write-wins per bike + component type) and is included in snapshots.
-- **Not yet:** packet encryption, remote packet cleanup, snapshot bootstrap trigger, master database export/import.
-- **Future option:** P2P WebRTC fallback transport, only if needed after BYOS workflow is stable.
-
-### 2.5 Near Real-Time Sync Profile (BYOS)
-For solo-shop workflows, sync should feel near real-time (seconds-level freshness), not hard real-time.
-
-- **Target freshness:** most cross-device updates visible within ~5-15 seconds while apps are foregrounded and connected.
-- **Push behavior:**
-- enqueue outbox entry immediately on each local mutation.
-- trigger a push attempt after successful write commit.
-- debounce/batch pushes over a short window (about 1-3 seconds) to reduce API chatter.
-- **Pull behavior:**
-- foreground polling every ~10 seconds.
-- background/low-attention polling every ~30-60 seconds.
-- immediate pull on app open/resume and network reconnect.
-- **Reliability guardrails:**
-- exponential backoff with jitter on provider/API failures.
-- idempotent delta apply so retries are safe.
-- if offline or provider unavailable, keep local writes and continue later from outbox.
-- **User feedback:** show lightweight sync state (`Syncing`, `Up to date`, `Offline`, `Error`) and `last synced` timestamp for operator trust.
-
-### 3. Garbage Control & Retention Pruning
-Outbox logs are safely garbage-collected only when entries are older than the lowest active peer watermark (`seq <= MIN(last_synced_seq)`) and bounded by a maximum retention window (e.g., 30 days) to prevent unbounded table growth.
-
-### 4. Snapshot Bootstrapping (New & Stale Peer Onboarding)
-If a brand-new device joins the workshop, or a dormant device is turned on after exceeding the retention window, incremental log replay is impossible. In these scenarios, the device performs a **Full Database Snapshot** bootstrap (`exportSnapshot` / `importSnapshot`), downloads the complete ground-truth state, seeds its local tables atomically, and advances its sync cursor to the current cluster tip.
-
-### 5. Master Takeover & Disaster Recovery
+### 3. Master Takeover & Disaster Recovery
 - **Database Export:** Settings UI includes an "Export Master Database (.sqlite3)" button, dumping the current OPFS SQLite binary file for local archival.
 - **Master Takeover / Import:** Mechanics can upload a `.sqlite3` file to overwrite the local OPFS database instance, instantly promoting any replacement phone, tablet, or laptop to the master state.

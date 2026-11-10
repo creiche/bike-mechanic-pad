@@ -1,3 +1,4 @@
+import { CloudError } from './cloud/types';
 import type { SyncControllerState } from './syncController';
 
 export type SyncTone = 'neutral' | 'ok' | 'busy' | 'warn' | 'error';
@@ -12,7 +13,7 @@ export function describeSync(state: SyncControllerState): SyncDisplay {
 	if (state.connection === 'unconfigured') return { label: 'Sync off', tone: 'neutral' };
 	if (state.connection === 'disconnected') {
 		return state.error?.kind === 'auth'
-			? { label: 'Sign-in expired', tone: 'error' }
+			? { label: 'Sign-in rejected', tone: 'error' }
 			: { label: 'Not connected', tone: 'neutral' };
 	}
 
@@ -25,6 +26,23 @@ export function describeSync(state: SyncControllerState): SyncDisplay {
 			return { label: 'Sync error', tone: 'error' };
 		case 'idle':
 			return { label: 'Up to date', tone: 'ok' };
+	}
+}
+
+// What a failed connection test means in practice. The browser reports a CORS refusal exactly like a dead network, so
+// the "offline" wording has to cover both.
+export function explainWebDavFailure(error: unknown, appOrigin: string): string {
+	if (!(error instanceof CloudError)) return error instanceof Error ? error.message : String(error);
+	switch (error.kind) {
+		case 'auth':
+			return 'The server rejected that username or password. Nextcloud accounts need an app password from Security settings.';
+		case 'offline':
+		case 'timeout':
+			return `Could not reach the server. Check the address and your connection. If those are right, the server is blocking this app: it must allow ${appOrigin} (see Server setup below). For a server on your local network, also allow this site to use local devices if the browser asks.`;
+		case 'not_found':
+			return 'The server has no WebDAV folder at that address. Check the address.';
+		default:
+			return error.message;
 	}
 }
 

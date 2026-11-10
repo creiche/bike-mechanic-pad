@@ -6,6 +6,7 @@ on:
   pull_request:
 
 jobs:
+  # Required: everything that must be green to merge.
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -18,5 +19,31 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e # builds and serves the production build, then drives a real browser
+      - run: npx playwright test --project=chromium --project=android # builds and serves the production build
       - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
+
+  # Required. Runs on macOS because in Playwright's Linux WebKit, Atomics.waitAsync loses wake-ups, which stalls
+  # sqlite's OPFS proxy so database requests never answer. That is the engine, not the app.
+  webkit:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium webkit
+      - run: npx playwright test --project=webkit --project=iphone --project=cross-engine
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results-webkit
+          path: test-results/
+          retention-days: 7

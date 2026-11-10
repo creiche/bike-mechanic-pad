@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs';
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test('export a backup, clear the database, then restore it', async ({ page }, testInfo) => {
 	await page.goto('/customers');

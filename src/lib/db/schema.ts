@@ -201,5 +201,13 @@ UPDATE bikes SET updated_at = created_at;
 -- Migration 4 rebuilt sync_outbox and lost this index; sync looks up a record's outbox rows for every incoming change.
 CREATE INDEX IF NOT EXISTS idx_sync_outbox_entity ON sync_outbox(entity_type, entity_id);
 `
+  },
+  {
+    version: 9,
+    name: 'remembered nearby devices',
+    sql: `
+-- Set only on a nearby device's push-cursor row, once it has been paired by QR. NULL means not trusted.
+ALTER TABLE peer_sync_state ADD COLUMN dtls_fingerprint TEXT;
+`
   }
 ];

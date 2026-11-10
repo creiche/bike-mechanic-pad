@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ApplyRemoteOptions, ApplyRemoteResult, OutboxEntry, SyncRepository } from '../db/repositories/sync';
-import { CloudError, type CloudStorageAdapter, type RemoteFile } from './cloud/types';
+import { CloudError, type RemoteFile } from './cloud/types';
 import { buildPacket, packetFileName, parsePacket } from './packet';
 import { computeBackoffMs, onRemoteChanges, SyncService } from './syncService';
+import type { PeerTransport, RelayTransport } from './transport';
 
 const FOLDER = '/sync';
 const self = { deviceId: 'dev-self', deviceName: 'Stand iPad' };
@@ -18,7 +19,8 @@ const delta = (seq: number): OutboxEntry => ({
 	created_at: '2026-11-07T10:00:00.000Z'
 });
 
-class FakeAdapter implements CloudStorageAdapter {
+class FakeAdapter implements RelayTransport {
+	readonly kind = 'relay';
 	readonly id = 'fake';
 	readonly displayName = 'Fake Cloud';
 	files = new Map<string, string>();
@@ -88,7 +90,7 @@ function setup(outbox: OutboxEntry[] = [], batchSize = 500) {
 	const adapter = new FakeAdapter();
 	const { repository, cursors } = fakeRepository(outbox);
 	const service = new SyncService({
-		adapter,
+		transport: adapter,
 		identity: self,
 		repository,
 		folderPath: FOLDER,
@@ -139,7 +141,7 @@ describe('SyncService push phase', () => {
 		await service.syncNow();
 
 		const moved = new FakeAdapter();
-		await new SyncService({ adapter: moved, identity: self, repository, folderPath: '/elsewhere' }).syncNow();
+		await new SyncService({ transport: moved, identity: self, repository, folderPath: '/elsewhere' }).syncNow();
 
 		expect(moved.uploads).toHaveLength(1);
 	});
@@ -470,5 +472,69 @@ describe('packets', () => {
 		const full = buildPacket(peer, [delta(1), delta(2), delta(3)]);
 		expect(() => parsePacket(JSON.stringify({ ...full, deltas: [delta(1), delta(3)] }), ref)).toThrow('malformed');
 		expect(parsePacket(JSON.stringify(base), ref).deltas).toHaveLength(2);
+	});
+});
+
+describe('SyncService over a peer transport', () => {
+	const blocked = { applied: 0, blocked: true, blockedAt: '2026-01-01T00:00:00.000Z', dropped: 0, lastSyncedSeq: 0 };
+
+	function setupPeer(onlyPeer: boolean) {
+		const folder = new FakeAdapter();
+		const { repository, cursors } = fakeRepository([delta(1)]);
+		const transport: PeerTransport = {
+			kind: 'peer',
+			id: 'webrtc:dev-peer',
+			displayName: peer.deviceName,
+			peerDeviceId: 'dev-peer',
+			isConnected: () => true,
+			disconnect: async () => {},
+			listFiles: () => folder.listFiles(),
+			downloadFile: (path, name) => folder.downloadFile(path, name),
+			isOnlyPeer: () => onlyPeer,
+			sendMesh: () => {}
+		};
+		const service = new SyncService({ transport, identity: self, repository, folderPath: FOLDER });
+		putPacket(folder, [delta(1)]);
+		const dropCalls = () => repository.applyRemoteDeltas.mock.calls.filter((call) => call[3]?.dropFirstOrphan);
+		return { folder, repository, cursors, service, dropCalls };
+	}
+
+	it('pulls without pushing or touching a folder', async () => {
+		const { folder, repository, service } = setupPeer(true);
+		const ensureFolder = vi.spyOn(folder, 'ensureFolder');
+
+		const state = await service.syncNow();
+
+		expect(repository.getSyncDelta).not.toHaveBeenCalled();
+		expect(ensureFolder).not.toHaveBeenCalled();
+		expect(state.lastSummary).toMatchObject({ pushedPackets: 0, pulledPackets: 1, appliedDeltas: 1 });
+	});
+
+	it('does not give up on a missing parent a third device may still hold', async () => {
+		const { repository, service, dropCalls } = setupPeer(false);
+		repository.applyRemoteDeltas.mockResolvedValue(blocked);
+
+		const state = await service.syncNow();
+
+		expect(dropCalls()).toEqual([]);
+		expect(state.lastSummary?.skippedDeltas).toBe(1);
+	});
+
+	it('gives up on a missing parent when only two devices exist', async () => {
+		const { repository, service, dropCalls } = setupPeer(true);
+		repository.applyRemoteDeltas.mockResolvedValue(blocked);
+
+		await service.syncNow();
+
+		expect(dropCalls()).toHaveLength(1);
+	});
+
+	it('leaves a restore replay running, because a peer never lists this device\'s packets', async () => {
+		const { cursors, repository, service } = setupPeer(true);
+		cursors.set('pull:dev-self', 0);
+
+		await service.syncNow();
+
+		expect(repository.deletePeerState).not.toHaveBeenCalled();
 	});
 });
