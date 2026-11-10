@@ -28,12 +28,10 @@ jobs:
           path: test-results/
           retention-days: 7
 
-  # Informational. Runs on macOS because in Playwright's Linux WebKit, Atomics.waitAsync loses wake-ups, which stalls
+  # Required. Runs on macOS because in Playwright's Linux WebKit, Atomics.waitAsync loses wake-ups, which stalls
   # sqlite's OPFS proxy so database requests never answer. That is the engine, not the app.
-  # Remove continue-on-error once this job is reliably green.
   webkit:
     runs-on: macos-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
