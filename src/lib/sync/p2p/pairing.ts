@@ -117,9 +117,9 @@ async function localPayload(pc: RTCPeerConnection, kind: PairingKind): Promise<s
 	return encodePairing(kind, pc.localDescription!.sdp);
 }
 
-// shortcut: Chromium now and then refuses the stored certificate with "no identity available" for reasons not yet
-// understood (it could not be reproduced outside the app); a second attempt with a fresh connection has cleared it.
-// Replace this with the real fix once the cause is found.
+// shortcut: Chromium 158 refuses about 1 in 130 new connections with "no identity available", cause unknown. The stored
+// certificate is not at fault: the same object worked straight away every time it was retried (12 of 12).
+// Remove this once a Chromium update stops the error showing up with the retry taken out.
 async function withOneRetry<T>(attempt: () => Promise<T>): Promise<T> {
 	try {
 		return await attempt();

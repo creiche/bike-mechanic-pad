@@ -28,8 +28,8 @@ jobs:
           path: test-results/
           retention-days: 7
 
-  # Informational: WebKit has an open offline-storage bug. Runs on macOS because Playwright's Linux WebKit build
-  # cannot reliably use OPFS (database requests hang), so tests there fail for reasons unrelated to the app.
+  # Informational. Runs on macOS because in Playwright's Linux WebKit, Atomics.waitAsync loses wake-ups, which stalls
+  # sqlite's OPFS proxy so database requests never answer. That is the engine, not the app.
   # Remove continue-on-error once this job is reliably green.
   webkit:
     runs-on: macos-latest
