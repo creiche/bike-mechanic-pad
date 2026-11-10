@@ -2,7 +2,10 @@
 
 ## 1. Project Ethos & Licensing
 - This is a free, local-first, offline-first open-source digital clipboard web app for solo bike mechanics under **GPLv3**.
-- Do NOT add external cloud dependencies, hosted API calls, tracking/telemetry, or remote database services.
+- **Strict Decentralization & No Lock-in:** Do NOT add proprietary corporate cloud dependencies, hosted API keys (like Dropbox, Google Drive, or OneDrive OAuth), tracking/telemetry, or remote database services. 
+- **Sync Transport Mandate:** All multi-device synchronization must use a decentralized Dual-Transport Model:
+  1. **Default Transport:** Local P2P WebRTC DataChannels with ephemeral QR-code pairing for zero-config shop floor use.
+  2. **Advanced/Remote Transport:** Open-standard WebDAV (RFC 4918) for self-hosted or remote cloud targets (Nextcloud, personal NAS).
 
 ## 2. Tech Stack & Architecture
 - **Framework:** SvelteKit (TypeScript) with Tailwind CSS.
