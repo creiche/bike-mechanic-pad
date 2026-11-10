@@ -178,7 +178,7 @@ export async function restoreBackup(json: string, selfPeerId: string, selfPeerNa
 
 // Wipe this device's shop data. The service menu is kept (it is the shop price list, not customer data), and so is the
 // sync outbox, so nothing already queued is lost. Pull cursors restart from zero, including this device's own, so the
-// next sync rebuilds everything from Dropbox instead of leaving a partial database.
+// next sync rebuilds everything from the relay instead of leaving a partial database.
 export async function clearLocalDatabase(selfPeerId: string, selfPeerName: string): Promise<void> {
 	await inTransaction(async (connection) => {
 		// Children first; cascades would also work but this keeps the order obvious.
@@ -193,7 +193,7 @@ export async function clearLocalDatabase(selfPeerId: string, selfPeerName: strin
 	notifyLocalWrite();
 }
 
-// Changes not yet uploaded to a relay (Dropbox). Before any relay has synced, every outbox entry is pending.
+// Changes not yet uploaded to a relay (WebDAV) or fetched by a nearby device. Before any relay has synced, every outbox entry is pending.
 export async function countPendingOutbox(): Promise<number> {
 	const rows = (await inTransaction((connection) =>
 		connection.exec(

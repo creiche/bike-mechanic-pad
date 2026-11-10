@@ -1,5 +1,6 @@
 import type { BindingSpec } from '@sqlite.org/sqlite-wasm';
 import { openDatabase, selectRows, type SqliteConnection } from "../client";
+import { notifyLocalWrite } from "../localWrites";
 import { inTransaction } from "../transaction";
 
 type DomainAction = "INSERT" | "UPDATE" | "DELETE";
@@ -481,7 +482,7 @@ const ENTITY_TABLES: Record<string, string> = {
 };
 
 // Restored rows bypass the repositories, so queue them here or they would never reach other devices (a replacement
-// tablet, a new Dropbox folder). They keep their original updated_at, so last-write-wins protects newer edits elsewhere.
+// tablet, a new WebDAV folder). They keep their original updated_at, so last-write-wins protects newer edits elsewhere.
 async function queueRestoredState(
   connection: SqliteConnection,
   snapshot: DatabaseSnapshot,
@@ -585,7 +586,62 @@ export function deletePeerState(peerId: string): Promise<void> {
   });
 }
 
-// Pull cursors are seq positions inside one folder's packets. When the relay changes (new folder or Dropbox app key)
+// A device paired by QR. Trust lives on the device's push-cursor row, so restores and cursor resets (which only touch
+// pull cursors) leave it alone and pruning needs no new rule. It is never exported or synced: trust is per device.
+export interface TrustedPeer {
+  deviceId: string;
+  deviceName: string;
+  fingerprint: string; // the base64 SHA-256 DTLS fingerprint, as carried in a pairing code
+}
+
+const NEARBY_PEER_PREFIX = pushPeerId("webrtc:");
+
+export async function getTrustedPeers(): Promise<TrustedPeer[]> {
+  const rows = await selectRows<{
+    peer_id: string;
+    peer_name: string;
+    dtls_fingerprint: string;
+  }>(
+    `SELECT peer_id, peer_name, dtls_fingerprint FROM peer_sync_state
+		 WHERE peer_id LIKE ? AND dtls_fingerprint IS NOT NULL
+		 ORDER BY peer_name`,
+    [`${NEARBY_PEER_PREFIX}%`],
+  );
+  return rows.map((row) => ({
+    deviceId: row.peer_id.slice(NEARBY_PEER_PREFIX.length),
+    deviceName: row.peer_name,
+    fingerprint: row.dtls_fingerprint,
+  }));
+}
+
+// A new QR pairing always wins, because the camera just authenticated this fingerprint. The cursor is left as it was.
+export async function trustPeer(peer: TrustedPeer): Promise<void> {
+  await inTransaction(async (connection) => {
+    await connection.exec(
+      `INSERT INTO peer_sync_state (peer_id, peer_name, dtls_fingerprint)
+			 VALUES (?, ?, ?)
+			 ON CONFLICT(peer_id) DO UPDATE SET
+			   peer_name = excluded.peer_name,
+			   dtls_fingerprint = excluded.dtls_fingerprint`,
+      {
+        bind: [
+          `${NEARBY_PEER_PREFIX}${peer.deviceId}`,
+          peer.deviceName,
+          peer.fingerprint,
+        ],
+      },
+    );
+  });
+  notifyLocalWrite();
+}
+
+// Deletes the push cursor too, so a forgotten device stops holding back outbox pruning.
+export async function forgetPeer(deviceId: string): Promise<void> {
+  await deletePeerState(`${NEARBY_PEER_PREFIX}${deviceId}`);
+  notifyLocalWrite();
+}
+
+// Pull cursors are seq positions inside one folder's packets. When the relay changes (new folder, server or account)
 // they mean nothing there, so forget them all and replay the new folder from the start (last-write-wins keeps it safe).
 export function resetPullCursors(): Promise<void> {
   return inTransaction(async (connection) => {
@@ -593,6 +649,44 @@ export function resetPullCursors(): Promise<void> {
       bind: [`${PULL_PEER_PREFIX}%`],
     });
   });
+}
+
+// Seqs only, so listing a long backlog for a nearby device does not load every row's payload.
+export function getOutboxSeqs(afterSeq: number): Promise<number[]> {
+  return inTransaction(async () => {
+    const rows = await selectRows<{ seq: number }>(
+      "SELECT seq FROM sync_outbox WHERE seq > ? ORDER BY seq ASC",
+      [afterSeq],
+    );
+    return rows.map((row) => row.seq);
+  });
+}
+
+export function getOutboxRange(
+  startSeq: number,
+  endSeq: number,
+  limit: number,
+): Promise<OutboxEntry[]> {
+  return inTransaction(() =>
+    selectRows<OutboxEntry>(
+      "SELECT * FROM sync_outbox WHERE seq BETWEEN ? AND ? ORDER BY seq ASC LIMIT ?",
+      [startSeq, endSeq, limit],
+    ),
+  );
+}
+
+// Devices this one has received changes from recently. Matches the outbox retention window: a device silent for
+// longer cannot be the source of a parent record that is still on its way.
+export async function getKnownDeviceIds(
+  activeWithinDays = 30,
+): Promise<string[]> {
+  const rows = await selectRows<{ peer_id: string }>(
+    `SELECT peer_id FROM peer_sync_state
+		 WHERE peer_id LIKE ?
+		   AND julianday(last_seen_at) >= julianday('now', '-' || ? || ' days')`,
+    [`${PULL_PEER_PREFIX}%`, activeWithinDays],
+  );
+  return rows.map((row) => row.peer_id.slice(PULL_PEER_PREFIX.length));
 }
 
 export interface ApplyRemoteResult {
@@ -1102,4 +1196,33 @@ export const syncRepository: SyncRepository = {
   deletePeerState,
   applyRemoteDeltas,
   pruneStaleOutboxLogs,
+};
+
+// What a device needs to serve its outbox to a nearby device; a separate surface so tests can fake just this.
+export interface PeerSyncRepository {
+  acknowledgeSync: typeof acknowledgeSync;
+  getPeerState: typeof getPeerState;
+  getOutboxSeqs: typeof getOutboxSeqs;
+  getOutboxRange: typeof getOutboxRange;
+  getKnownDeviceIds: typeof getKnownDeviceIds;
+}
+
+export const peerSyncRepository: PeerSyncRepository = {
+  acknowledgeSync,
+  getPeerState,
+  getOutboxSeqs,
+  getOutboxRange,
+  getKnownDeviceIds,
+};
+
+export interface PeerTrustRepository {
+  getTrustedPeers: typeof getTrustedPeers;
+  trustPeer: typeof trustPeer;
+  forgetPeer: typeof forgetPeer;
+}
+
+export const peerTrustRepository: PeerTrustRepository = {
+  getTrustedPeers,
+  trustPeer,
+  forgetPeer,
 };

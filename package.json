@@ -37,6 +37,8 @@
 		"vitest": "^4.1.12"
 	},
 	"dependencies": {
-		"@sqlite.org/sqlite-wasm": "^3.54.1-build1"
+		"@sqlite.org/sqlite-wasm": "^3.54.1-build1",
+		"jsqr": "^1.4.0",
+		"qrcode-generator": "^2.0.4"
 	}
 }

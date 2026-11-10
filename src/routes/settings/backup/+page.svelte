@@ -126,7 +126,7 @@
 
 		<section class="{cardClass} border-rose-900" aria-label="Clear database">
 			<h2 class="text-lg font-semibold text-rose-300">Clear local database</h2>
-			<p class="mb-4 mt-1 text-sm text-neutral-400">Deletes all shop data on this device. Export a backup first; this cannot be undone. If sync is on, this device refills from Dropbox on the next sync.</p>
+			<p class="mb-4 mt-1 text-sm text-neutral-400">Deletes all shop data on this device. Export a backup first; this cannot be undone. With WebDAV on, this device refills on the next sync with about the last 30 days of changes. A paired nearby device can only send back the changes it made itself.</p>
 			<label class="mb-4 block text-sm">
 				<span class={labelTextClass}>Type DELETE to confirm</span>
 				<input class={inputClass} type="text" bind:value={confirmText} autocomplete="off" autocapitalize="off" spellcheck="false" />

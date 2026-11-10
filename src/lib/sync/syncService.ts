@@ -1,7 +1,8 @@
 import { pullPeerId, pushPeerId, SyncProtocolError, syncRepository, type SyncRepository } from '../db/repositories/sync';
-import { CloudError, type CloudErrorKind, type CloudStorageAdapter } from './cloud/types';
+import { CloudError, type CloudErrorKind } from './cloud/types';
 import type { DeviceIdentity } from './device';
 import { buildPacket, packetFileName, parsePacket, parsePacketFileName, type PacketRef, type SyncPacket } from './packet';
+import type { RelayTransport, SyncTransport } from './transport';
 
 export type SyncStatus = 'idle' | 'syncing' | 'offline' | 'error';
 export type SyncErrorKind = CloudErrorKind | 'protocol' | 'internal';
@@ -27,7 +28,7 @@ export interface SyncState {
 }
 
 export interface SyncServiceOptions {
-	adapter: CloudStorageAdapter;
+	transport: SyncTransport;
 	identity: DeviceIdentity;
 	repository?: SyncRepository;
 	folderPath?: string;
@@ -73,10 +74,10 @@ function describeFailure(error: unknown): { status: SyncStatus; kind: SyncErrorK
 	return { status: 'error', kind: error instanceof SyncProtocolError ? 'protocol' : 'internal', message };
 }
 
-// Runs the push -> pull -> prune cycle against one cloud relay. Implements the Svelte store contract
+// Runs the push -> pull -> prune cycle against one transport. Implements the Svelte store contract
 // (`subscribe`), so components can read it as `$syncService`.
 export class SyncService {
-	private readonly adapter: CloudStorageAdapter;
+	private readonly transport: SyncTransport;
 	private readonly identity: DeviceIdentity;
 	private readonly repository: SyncRepository;
 	private readonly folderPath: string;
@@ -96,7 +97,7 @@ export class SyncService {
 	private debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 	constructor(options: SyncServiceOptions) {
-		this.adapter = options.adapter;
+		this.transport = options.transport;
 		this.identity = options.identity;
 		this.repository = options.repository ?? syncRepository;
 		this.folderPath = options.folderPath ?? DEFAULT_SYNC_FOLDER;
@@ -207,18 +208,21 @@ export class SyncService {
 	}
 
 	private async runCycle(): Promise<SyncCycleSummary> {
-		await this.adapter.ensureFolder(this.folderPath);
-
-		const push = await this.pushPhase();
+		const transport = this.transport;
+		let push = { pushedPackets: 0, pushedDeltas: 0 };
+		if (transport.kind === 'relay') {
+			await transport.ensureFolder(this.folderPath);
+			push = await this.pushPhase(transport);
+		}
 		const pull = await this.pullPhase();
 		const prunedRows = await this.prunePhase();
 		return { ...push, ...pull, prunedRows };
 	}
 
 	// Upload every local delta the relay has not seen, in packets of at most `batchSize` rows.
-	private async pushPhase(): Promise<Pick<SyncCycleSummary, 'pushedPackets' | 'pushedDeltas'>> {
+	private async pushPhase(transport: RelayTransport): Promise<Pick<SyncCycleSummary, 'pushedPackets' | 'pushedDeltas'>> {
 		// Per folder: a new folder starts empty, so "already uploaded" elsewhere must not count for it.
-		const relayId = pushPeerId(`${this.adapter.id}:${this.folderPath}`);
+		const relayId = pushPeerId(`${transport.id}:${this.folderPath}`);
 		let pushedPackets = 0;
 		let pushedDeltas = 0;
 
@@ -227,8 +231,8 @@ export class SyncService {
 			if (deltas.length === 0) break;
 
 			const packet = buildPacket(this.identity, deltas);
-			await this.uploadPacket(packet);
-			await this.repository.acknowledgeSync(relayId, this.adapter.displayName, packet.endSeq);
+			await this.uploadPacket(transport, packet);
+			await this.repository.acknowledgeSync(relayId, transport.displayName, packet.endSeq);
 
 			pushedPackets++;
 			pushedDeltas += deltas.length;
@@ -241,15 +245,15 @@ export class SyncService {
 	// A taken file name means an earlier attempt already uploaded this exact range (the ack was lost).
 	// Identical deltas are fine (the device name may have changed since); different deltas mean two devices share an
 	// id, which must not pass silently.
-	private async uploadPacket(packet: SyncPacket): Promise<void> {
+	private async uploadPacket(transport: RelayTransport, packet: SyncPacket): Promise<void> {
 		const name = packetFileName(packet);
 		const content = JSON.stringify(packet);
 
 		try {
-			await this.adapter.uploadFile(this.folderPath, name, content);
+			await transport.uploadFile(this.folderPath, name, content);
 		} catch (error) {
 			if (!(error instanceof CloudError && error.kind === 'conflict')) throw error;
-			const existing = await this.adapter.downloadFile(this.folderPath, name);
+			const existing = await transport.downloadFile(this.folderPath, name);
 			let existingDeltas: unknown;
 			try {
 				existingDeltas = (JSON.parse(existing) as Partial<SyncPacket>).deltas;
@@ -264,7 +268,7 @@ export class SyncService {
 
 	// Apply packets from other devices, oldest first per device. One device's bad packet stops only that device.
 	private async pullPhase(): Promise<Pick<SyncCycleSummary, 'pulledPackets' | 'appliedDeltas' | 'skippedDeltas' | 'droppedOrphans'>> {
-		const files = await this.adapter.listFiles(this.folderPath);
+		const files = await this.transport.listFiles(this.folderPath);
 		const selfPeerId = pullPeerId(this.identity.deviceId);
 		// This device's own packets are only read after a restore or clear, which leave a cursor for them. Push runs
 		// first, so restored rows replay after any delete in the replayed history and bring those records back.
@@ -289,7 +293,7 @@ export class SyncService {
 
 			for (const ref of pending) {
 				try {
-					const text = await this.adapter.downloadFile(this.folderPath, packetFileName(ref));
+					const text = await this.transport.downloadFile(this.folderPath, packetFileName(ref));
 					const packet = parsePacket(text, ref);
 					const result = await this.repository.applyRemoteDeltas(peerId, packet.deviceName, packet.deltas);
 					pulledPackets++;
@@ -314,7 +318,9 @@ export class SyncService {
 		// moved, the parent is not coming: it was deleted, restored away on this device, or older than the folder's
 		// history. Retrying is pointless. Give up on the oldest blocked change only: a parent of the oldest cannot be
 		// hiding behind a newer block, but a newer block's parent can be behind the oldest.
-		if (appliedDeltas === 0 && stalled.length > 0) {
+		// A peer shows only its own history, so with a third device around the parent may simply be on that device.
+		const parentCannotArrive = this.transport.kind === 'relay' || this.transport.isOnlyPeer();
+		if (parentCannotArrive && appliedDeltas === 0 && stalled.length > 0) {
 			const oldest = stalled.reduce((a, b) => (b.blockedAt < a.blockedAt ? b : a));
 			const result = await this.repository.applyRemoteDeltas(oldest.peerId, oldest.packet.deviceName, oldest.packet.deltas, {
 				dropFirstOrphan: true
@@ -323,7 +329,8 @@ export class SyncService {
 			this.droppedOrphans += result.dropped;
 		}
 
-		if (replayingOwn && !stalled.some((entry) => entry.peerId === selfPeerId)) {
+		// Only a transport that listed this device's packets has replayed them; a peer never does, and must not end the replay.
+		if (replayingOwn && byDevice.has(this.identity.deviceId) && !stalled.some((entry) => entry.peerId === selfPeerId)) {
 			await this.repository.deletePeerState(selfPeerId);
 		}
 

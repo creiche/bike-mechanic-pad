@@ -23,6 +23,13 @@ import {
 	applyRemoteDeltas,
 	appendMutation,
 	exportSnapshot,
+	forgetPeer,
+	getKnownDeviceIds,
+	getTrustedPeers,
+	resetPullCursors,
+	trustPeer,
+	getOutboxRange,
+	getOutboxSeqs,
 	getPeerState,
 	getSyncDelta,
 	importSnapshot,
@@ -677,5 +684,66 @@ describe('component ledger sync', () => {
 		expect(queryRows('SELECT bike_id, component_type, work_order_id FROM bike_components')).toEqual([
 			{ bike_id: bike.id, component_type: 'chain', work_order_id: order.id }
 		]);
+	});
+});
+
+describe('serving the outbox to a nearby device', () => {
+	const append = () => appendMutation({ entity_type: 'customer', entity_id: crypto.randomUUID(), action: 'INSERT', payload: {} });
+
+	it('lists seqs after a cursor and reads a bounded range', async () => {
+		await append();
+		await append();
+		await append();
+
+		expect(await getOutboxSeqs(1)).toEqual([2, 3]);
+		expect((await getOutboxRange(1, 3, 2)).map((row) => row.seq)).toEqual([1, 2]);
+		expect((await getOutboxRange(3, 9, 500)).map((row) => row.seq)).toEqual([3]);
+	});
+
+	it('knows only devices it has recently received changes from', async () => {
+		await acknowledgeSync(pullPeerId('dev-recent'), 'Recent', 1);
+		await acknowledgeSync(pullPeerId('dev-retired'), 'Retired', 1);
+		await acknowledgeSync('relay:webrtc:dev-push', 'Push cursor', 1);
+		db.exec(`UPDATE peer_sync_state SET last_seen_at = '2020-01-01T00:00:00.000Z' WHERE peer_id = 'pull:dev-retired'`);
+
+		expect(await getKnownDeviceIds()).toEqual(['dev-recent']);
+	});
+});
+
+describe('remembered nearby devices', () => {
+	const phone = { deviceId: 'dev-phone', deviceName: 'Phone', fingerprint: 'FP1' };
+	const cursor = 'relay:webrtc:dev-phone';
+
+	it('keeps the sync cursor when trust is saved, and the fingerprint when the cursor moves', async () => {
+		await acknowledgeSync(cursor, 'Phone', 7);
+		await trustPeer(phone);
+		expect((await getPeerState(cursor))?.last_synced_seq).toBe(7);
+
+		await acknowledgeSync(cursor, 'Renamed', 9);
+		expect(await getTrustedPeers()).toEqual([{ ...phone, deviceName: 'Renamed' }]);
+	});
+
+	it('lets a new QR pairing replace the fingerprint', async () => {
+		await trustPeer(phone);
+		await trustPeer({ ...phone, fingerprint: 'FP2' });
+		expect((await getTrustedPeers()).map((peer) => peer.fingerprint)).toEqual(['FP2']);
+	});
+
+	it('does not count a device that only has a cursor', async () => {
+		await acknowledgeSync(cursor, 'Phone', 1);
+		expect(await getTrustedPeers()).toEqual([]);
+	});
+
+	it('survives a relay change', async () => {
+		await trustPeer(phone);
+		await resetPullCursors();
+		expect(await getTrustedPeers()).toEqual([phone]);
+	});
+
+	it('forgets the device and its cursor', async () => {
+		await trustPeer(phone);
+		await forgetPeer('dev-phone');
+		expect(await getTrustedPeers()).toEqual([]);
+		expect(await getPeerState(cursor)).toBeNull();
 	});
 });

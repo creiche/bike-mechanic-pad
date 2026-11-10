@@ -52,7 +52,7 @@ sw.addEventListener('activate', (event) => {
 sw.addEventListener('fetch', (event) => {
 	const { request } = event;
 	const url = new URL(request.url);
-	// Only our own GETs. Cross-origin calls (Dropbox sync) go straight to the network.
+	// Only our own GETs. Cross-origin calls (WebDAV sync) go straight to the network.
 	if (request.method !== 'GET' || url.origin !== sw.location.origin) return;
 
 	event.respondWith(
