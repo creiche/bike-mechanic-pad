@@ -22,7 +22,12 @@ export default defineConfig({
 		// Phone screens and touch, on the desktop browser engines. Not real devices.
 		{ name: 'iphone', use: { ...devices['iPhone 15'] }, testIgnore: /crossEngine/ },
 		{ name: 'android', use: { ...devices['Pixel 7'] }, testIgnore: /crossEngine/ },
-		// Drives Chromium and WebKit together; the only project that needs both browsers.
-		{ name: 'cross-engine', use: { browserName: 'chromium' }, testMatch: /crossEngine/ }
+		// Drives Chromium and WebKit together; the only project that needs both browsers. It runs on GitHub's macOS
+		// runner, which blocks mDNS, so Chromium uses its real address here (see e2e/fixtures.ts for WebKit).
+		{
+			name: 'cross-engine',
+			use: { browserName: 'chromium', launchOptions: { args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] } },
+			testMatch: /crossEngine/
+		}
 	]
 });

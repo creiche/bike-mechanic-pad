@@ -1,5 +1,4 @@
 import { mkdirSync } from 'node:fs';
-import { networkInterfaces } from 'node:os';
 import { test as base, webkit, type BrowserContext } from '@playwright/test';
 
 export { expect } from '@playwright/test';
@@ -11,18 +10,14 @@ interface DeviceFixtures {
 	newWebKitDevice: () => Promise<BrowserContext>;
 }
 
-// Playwright's WebKit build never resolves a peer's mDNS (.local) address, so two of them cannot connect; system WebKit
-// (Safari 26.5, two WKWebView processes) does connect over .local alone. Swapping the name for the real address keeps
-// everything else about WebKit pairing under test. Not used for cross-engine, where Chromium resolves the name.
-const LAN_ADDRESS = Object.values(networkInterfaces())
-	.flat()
-	.find((address) => address?.family === 'IPv4' && !address.internal)?.address;
-
-function resolveMdnsInPage(address: string | undefined) {
-	const original = RTCPeerConnection.prototype.setRemoteDescription;
-	RTCPeerConnection.prototype.setRemoteDescription = function (this: RTCPeerConnection, description: RTCSessionDescriptionInit) {
-		return original.call(this, { type: description.type, sdp: description.sdp?.replace(/[0-9a-f-]{36}\.local/g, address ?? '$&') });
-	} as typeof original;
+// Test browsers cannot pair over mDNS (.local) names here: Playwright's WebKit never resolves them, and GitHub's macOS
+// runner blocks the multicast they need. WebKit uses its real address once a page has camera access, as on a device that
+// has just scanned a QR code, so each WebKit page asks for the camera first. mDNS stays under test in the Linux Chromium job.
+function exposeRealAddress() {
+	void navigator.mediaDevices?.getUserMedia({ video: true }).then(
+		(stream) => stream.getTracks().forEach((track) => track.stop()),
+		() => {}
+	);
 }
 
 // WebKit's normal Playwright contexts behave like Private Browsing, where OPFS is unavailable and the database cannot
@@ -46,19 +41,17 @@ export const test = base.extend<DeviceFixtures & { opened: BrowserContext[] }>({
 				deviceScaleFactor,
 				isMobile,
 				hasTouch,
+				permissions: ['camera'],
 				env: { ...process.env, HOME: home, CFFIXED_USER_HOME: home }
 			});
+			await context.addInitScript(exposeRealAddress);
 			opened.push(context);
 			return context;
 		});
 	},
 	newDevice: async ({ browser, browserName, newWebKitDevice, opened }, use) => {
 		await use(async () => {
-			if (browserName === 'webkit') {
-				const device = await newWebKitDevice();
-				await device.addInitScript(resolveMdnsInPage, LAN_ADDRESS);
-				return device;
-			}
+			if (browserName === 'webkit') return newWebKitDevice();
 			const context = await browser.newContext();
 			opened.push(context);
 			return context;
