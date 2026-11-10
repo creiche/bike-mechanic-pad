@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test('the page is cross-origin isolated, so OPFS can work', async ({ page }) => {
 	await page.goto('/customers');

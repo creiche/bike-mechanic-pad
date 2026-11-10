@@ -6,6 +6,7 @@ on:
   pull_request:
 
 jobs:
+  # Required: everything that must be green to merge.
   verify:
     runs-on: ubuntu-latest
     steps:
@@ -18,5 +19,27 @@ jobs:
       - run: npm run check
       - run: npm test
       - run: npx playwright install --with-deps chromium
-      - run: npm run test:e2e # builds and serves the production build, then drives a real browser
+      - run: npx playwright test --project=chromium --project=android # builds and serves the production build
       - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-results
+          path: test-results/
+          retention-days: 7
+
+  # Informational: WebKit has an open offline-storage bug. Runs on macOS because Playwright's Linux WebKit build
+  # cannot reliably use OPFS (database requests hang), so tests there fail for reasons unrelated to the app.
+  # Remove continue-on-error once this job is reliably green.
+  webkit:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install chromium webkit
+      - run: npx playwright test --project=webkit --project=iphone --project=cross-engine

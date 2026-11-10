@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 
 test('after one online visit the app reloads and works with no network', async ({ page, context }) => {
 	await page.goto('/customers');
