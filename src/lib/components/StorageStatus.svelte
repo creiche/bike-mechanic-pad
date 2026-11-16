@@ -21,7 +21,8 @@
 		const setOnline = () => (online = navigator.onLine);
 		window.addEventListener('online', setOnline);
 		window.addEventListener('offline', setOnline);
-		void navigator.storage?.persisted?.().then((value) => (persisted = value));
+		// Ask (not just check), so the browser does not clear the shop database under disk pressure. Resolves true if already granted.
+		void navigator.storage?.persist?.().then((value) => (persisted = value));
 		const stopWrites = onLocalWrite(() => void refreshPending());
 		void refreshPending();
 		return () => {
