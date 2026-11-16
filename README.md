@@ -20,7 +20,12 @@ Open the app once with a network connection. A service worker (`src/service-work
 
 ## Getting Started
 
-The app is a Progressive Web App. Open it in a supported browser; install it to a device's home screen if you want an app-like shortcut. The database is local to the browser profile until you configure sync.
+The app is a Progressive Web App: there is nothing to download from an app store. Open its web address once, then install it **before entering shop data**, because on some devices the installed app keeps its own separate storage:
+
+- **iPad / iPhone:** in Safari, tap Share, then **Add to Home Screen**.
+- **Android, Chrome, Edge:** tap **Install** in the banner, or choose **Install app** from the browser menu.
+
+The app shows these steps until it is installed. The database stays on the device until you configure sync.
 
 Typical workflow:
 
@@ -39,8 +44,6 @@ Sync is opt-in, and there are two ways to do it under **Settings**. Both can run
 **WebDAV server.** For syncing when devices are apart, enter the address, username, and password of a WebDAV server you control, such as Nextcloud or a NAS, and use the same sync folder on every device. The address must be https, and the server must allow this app through CORS; **Server setup** in Settings lists exactly what to allow. The password is stored unencrypted in the browser, so use an app password where your server offers one. Changing the folder after sync has begun starts a fresh sync folder; it does not move existing data for you.
 
 Sync is not a backup guarantee. It depends on your network, your server, and the correct folder being used on each device. A newly added device receives only about the last 30 days of changes, so restore a backup on it first. Confirm that your devices have synced successfully, and maintain an independent backup and a recovery procedure that you have tested.
-
-> **Security warning: GitHub Pages hosting.** Browser storage (localStorage and the OPFS database) belongs to an *origin*, not a URL path. Every project site under `yourname.github.io` shares one origin, so any other page hosted on the same GitHub account can read this app's local database and saved Dropbox tokens. For real shop data, serve the app from a custom domain or a dedicated host that runs only this app.
 
 ## Important: Self-Supported Software and Risk
 
@@ -65,6 +68,17 @@ npm test
 npm run test:e2e
 npm run build
 ```
+
+### Deploying
+
+Releases go to Cloudflare Pages (free plan) from CI: push a `v*` tag, and once every test job passes, the `deploy` job in `.github/workflows/ci.yml` publishes that exact build. The one-time setup is described in that file.
+
+Rules for any host, including forks:
+
+- **The address is permanent.** Each mechanic's database, and the CORS allow-list on their WebDAV server, are tied to the app's exact origin (scheme and host). Moving to a new address strands their data until they export a backup and restore it there. Pick the address before anyone uses it.
+- **The app needs an origin of its own.** Browser storage belongs to an origin, not a URL path. Every GitHub Pages project site under `yourname.github.io` shares one origin, so any other page there could read this app's database and WebDAV password. Use a domain or subdomain that serves only this app.
+- **The host must send the headers in `static/_headers`.** Cloudflare Pages and Netlify read that file. The service worker can add the COOP/COEP headers on other hosts, but only after a reload.
+- **Whoever controls the domain and the host account can push code to every installed copy.** Turn on two-factor sign-in for GitHub, Cloudflare, and the domain registrar. If you use a custom domain, keep it on auto-renew, because whoever registers it after it lapses could serve code that reads every user's data.
 
 ## License
 

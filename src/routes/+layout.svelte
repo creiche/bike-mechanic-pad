@@ -1,6 +1,7 @@
 <script lang="ts">
 	import favicon from '#lib/assets/favicon.svg';
 	import { resolve } from '$app/paths';
+	import InstallHint from '../lib/components/InstallHint.svelte';
 	import StorageStatus from '../lib/components/StorageStatus.svelte';
 	import SyncStatusPill from '../lib/components/SyncStatusPill.svelte';
 	import { syncService } from '../lib/sync/runtime';
@@ -29,5 +30,7 @@
 		<a href={resolve('/settings')} aria-label="Sync settings"><SyncStatusPill /></a>
 	</div>
 </header>
+
+<InstallHint />
 
 {@render children()}
