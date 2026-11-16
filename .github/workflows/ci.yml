@@ -6,6 +6,12 @@ on:
     tags: ['v*'] # pushing a v* tag releases to mechanics' devices, after every check below passes
   pull_request:
 
+# A new push to a PR cancels its older run, so stale jobs don't queue for a scarce macOS runner.
+# Pushes to main and tags are never cancelled: a release must finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Required: everything that must be green to merge.
   verify:
